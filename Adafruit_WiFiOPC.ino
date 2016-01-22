@@ -1,27 +1,15 @@
-/*
-Yay for oscilloscopes.
-OK, now that I'm measuring frame rate correctly...
-
-getting about 175 updates/sec with interpolation, dithering and parallel output.
-There's a periodic slow moment, I think when a new data packet arrives.
-Actual throughput is more like 60-200 updates/sec.
-
-Without parallel output, is potentially up to ~500 updates/sec for interp and dithering.
-(actual 70-510)
-8 MHz to 512 DotStars
-512 * 32 = 16384 bits (plus 32-bit header and 256-bit footer) = 16672 bits
-8 MHz / 16672 = 479 updates/sec
-If using SPI DMA (not added yet), we'll get this time "free."
-
-If just dithering (no interp), getting 72-800 updates/sec
-
-The good news: runs 'smoothly,' as in frame arrive without fits and starts.
-The not-so-good news: 48 MHz M0 is just too slow for interpolation + dithering + parallel output.
-We MIGHT be able to pick one or two (e.g. interp + dither, then use SPI DMA for output
-on a SINGLE strand), or may have to pare back further (e.g. no interp, but maybe dither,
-or other way 'round).
-*/
-
+// Wireless Open Pixel Control widget...kindasorta a little bit like
+// Fadecandy, but self-contained with wireless and using a single long
+// strand of DotStar LEDs instead of 8-way NeoPixels.  This is the OPC
+// 'server' side -- the OPC 'client' application, which actually drives
+// the animation, runs on a regular computer running the Processing
+// language (www.processing.org).
+// Requires either:
+//   Arduino Zero:             https://www.adafruit.com/products/2843
+//   and WiFi Shield 101:      https://www.adafruit.com/products/2891
+// OR:
+//   Adafruit Feather M0 WiFi: https://www.adafruit.com/products/TBD
+// Plus a length of DotStar LEDs (strip, matrix, etc.) and a power source.
 
 #include <SPI.h>
 #include <WiFi101.h>
@@ -30,12 +18,14 @@ or other way 'round).
 #include "utility/dmac.h"
 #include "utility/dma.h"
 
-//#define Serial SerialUSB
+//#define Serial SerialUSB // Enable this if using 'Native USB' port
 
 // CONFIG & GLOBALS --------------------------------------------------------
 
-char *ssid = "NETWORK_NAME",
-     *pass = "NETWORK_PASSWORD";
+char      *ssid = "NETWORK_NAME",  // WiFi credentials
+          *pass = "NETWORK_PASSWORD";
+#define    INPORT  7890            // TCP port to listen on
+WiFiServer server(INPORT);
 
 // Declare second SPI peripheral 'SPI1':
 SPIClass SPI1(      // 11/12/13 classic UNO-style SPI
@@ -43,14 +33,12 @@ SPIClass SPI1(      // 11/12/13 classic UNO-style SPI
   34,               // MISO pin (also digital pin 12)
   37,               // SCK pin  (also digital pin 13)
   35,               // MOSI pin (also digital pin 11)
-  SPI_PAD_0_SCK_1,  // TX pad (MOSI, SCK pads)
-  SERCOM_RX_PAD_3); // RX pad (MISO pad)
+  SPI_PAD_0_SCK_1,  // TX pad (for MOSI, SCK)
+  SERCOM_RX_PAD_3); // RX pad (for MISO)
 
-Adafruit_ZeroDMA myDMA;
-
-#define NUM_LEDS        512
+#define NUM_LEDS        512 // Upper limit; OK to receive data for fewer
 #define SPI_BUFFER_SIZE (4 + NUM_LEDS * 4 + ((NUM_LEDS / 2) + 7) / 8)
-// SPI buffer includes space for 32-bit '0' header, 32 bits per LED,
+// SPI buffer includes space for DotStar 32-bit '0' header, 32 bits per LED,
 // and footer of 1 bit per 2 LEDs (rounded to next byte boundary, for SPI).
 // For 512 pixels, that's 2084 bytes per SPI buffer (x2 = 4168 bytes total).
 
@@ -60,32 +48,31 @@ uint8_t spiBuffer[2][SPI_BUFFER_SIZE];
 uint8_t spiBufferBeingFilled = 0;    // Index of currently-calculating buf
 volatile bool spiReady       = true; // True when SPI DMA ready for new data
 
+// Data for most-recently-received OPC color payload, payload before that,
+// and new in-progress payload currently arriving.  512 LEDs = 4608 bytes.
+uint8_t rgbBuf[3][NUM_LEDS * 3];
+
 // These tables (computed at runtime) are used for gamma correction and
 // dithering.  RAM used = 256*9+NUM_LEDS*3 bytes.  512 LEDs = 3840 bytes.
 uint8_t loR[256], hiR[256], fracR[256], errR[NUM_LEDS],
         loG[256], hiG[256], fracG[256], errG[NUM_LEDS],
         loB[256], hiB[256], fracB[256], errB[NUM_LEDS];
 
-// Used for interpolation.  512 LEDs = 1536 bytes.
-uint8_t rgbMix[NUM_LEDS * 3];
-
-// Data for most-recently-received OPC color payload, payload before that,
-// and new in-progress payload currently arriving.  512 LEDs = 4608 bytes.
-uint8_t rgbBuf[3][NUM_LEDS * 3];
-
-// Order of color bytes as issued to the DotStar LEDs.
-// Current LEDs use BRG order (blue=first, red=second, green=last)
+// Order of color bytes as issued to the DotStar LEDs.  Current DotStars use
+// BRG order (blue=first, red=second, green=last); pre-2015 DotStars use GBR
+// order.  THESE RELATE ONLY TO THE LED STRIP; OPC data is always RGB order.
 #define DOTSTAR_GREENBYTE 0
 #define DOTSTAR_BLUEBYTE  1
 #define DOTSTAR_REDBYTE   2
-// Pre-2015 DotStars use GBR order.
-// THESE VALUES RELATE ONLY TO THE LED STRIP; OPC data is always RGB order.
 
-WiFiServer server(7890); // arg = port to listen on
+Adafruit_ZeroDMA myDMA; // For DMA transfers
 
+// Used for interpolation.  512 LEDs = 1536 bytes.
+//uint8_t rgbMix[NUM_LEDS * 3];
 
 // UTILITY FUNCTIONS -------------------------------------------------------
 
+// Called each time a DMA transfer finishes
 void dma_callback(struct dma_resource* const resource) {
   spiReady = true; // OK to issue next SPI DMA payload now!
 }
@@ -113,18 +100,18 @@ void fillGamma(float g, uint8_t m, uint8_t *lo, uint8_t *hi, uint8_t *frac) {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("HELLO HELLO HELLO");
+  while(!Serial);
+  Serial.println("OPC WiFi Server");
 
   SPI.begin(); // For WiFi Shield 101
 
   // Connect to WiFi network
-  Serial.println();
   Serial.print("Connecting to ");
-  Serial.println(ssid);
-
+  Serial.print(ssid);
+  Serial.print("..");
   WiFi.begin(ssid, pass);
 
-  // Do stuff while WiFi starts up...
+  // Do some other init while WiFi starts up...
 
   // Initialize SPI buffers.  Everything's set to 0xFF initially to cover
   // the per-pixel 0xFF marker and the end-of-data '1' bits, then the first
@@ -139,12 +126,11 @@ void setup() {
   fillGamma(2.7, 255, loB, hiB, fracB); // override this later).
   // err buffers don't need init, they'll naturally reach equilibrium
 
-  memset(rgbBuf, 0, sizeof(rgbBuf));
+  memset(rgbBuf, 0, sizeof(rgbBuf));    // Clear receive buffers
 
-  SPI1.begin(); // Init second SPI bus
+  SPI1.begin();                         // Init second SPI bus
 
   // Configure DMA for SERCOM1 (our 'SPI1' port on 11/12/13)
-  Serial.println("Configuring");
   myDMA.configure_peripheraltrigger(SERCOM1_DMAC_ID_TX);
   myDMA.configure_triggeraction(DMA_TRIGGER_ACTON_BEAT);
   myDMA.allocate();
@@ -152,19 +138,23 @@ void setup() {
   myDMA.register_callback(dma_callback);
   myDMA.enable_callback();
 
+  // Turn off LEDs
+  magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], NUM_LEDS);
+  spiBufferBeingFilled = 1 - spiBufferBeingFilled;
+
   while(WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
+    Serial.write('.');
     delay(500);
   }
-  Serial.println();
-  Serial.println("WiFi connected");
+  Serial.println("OK!");
 
   // Print the IP address
   Serial.println((IPAddress)WiFi.localIP());
 
   // Start the server listening for incoming client connections
   server.begin();
-  Serial.println("Server listening on port 7890");
+  Serial.print("Server listening on port ");
+  Serial.println(INPORT);
 }
 
 // -------------------------------------------------------------------------
@@ -172,36 +162,20 @@ void setup() {
 // This function interpolates between two RGB input buffers, gamma- and
 // color-corrects the interpolated result with 16-bit dithering and issues
 // the resulting data to the GPIO port.
-// Normally this would be a three-step process (interpolate, reformat for
-// GPIO, issue to GPIO) but a quirk of the ESP8266 requires 'interleaving'
-// the latter two steps to improve performance.  ESP8266 GPIO operations
-// are much slower than the CPU frequency and are 'blocking' -- when two
-// operations occur on the same port in rapid succession, the second has to
-// wait for the first to finish.  This was a performance killer in this
-// application, which requires sending data to the DotStar strips quickly
-// as possible.  The workaround here is to interleave GPIO and non-GPIO
-// operations (the latter are not blocked by GPIO and continue executing).
-// Aligning the number of operations for both is why this version of the
-// code requires 8 pins of 64 LEDs.  Additionally, two buffers for GPIO
-// data are required -- one is being filled with new data while the other
-// is being issued as output.  The 'filled' buffer will be issued to the
-// strips on the *next* call to this function.
 void magic(
- uint8_t  *rgbIn1,    // First RGB input buffer being interpolated
- uint8_t  *rgbIn2,    // Second RGB input buffer being interpolated
- uint8_t   w2,        // Weighting (0-255) of second buffer in interpolation
- uint8_t  *fillBuf) { // SPI data buf being filled
-  uint8_t  mix;
-  uint16_t weight1, weight2, byteNum, pixelNum, e;
-
-  // First pass: interpolate between rgbIn1 and rgbIn2 buffers (output to
-  // global rgbMix buffer), where w2 is the weighting (0-255) of rgbIn2
-  // (e.g. 0 = 100% rgbIn1, 255 = 100% rgbIn2, 127 = ~50% each).
+ uint8_t *rgbIn1,    // First RGB input buffer being interpolated
+ uint8_t *rgbIn2,    // Second RGB input buffer being interpolated
+ uint8_t  w2,        // Weighting (0-255) of second buffer in interpolation
+ uint8_t *fillBuf,   // SPI data buffer being filled (DotStar-native order)
+ uint16_t numLEDs) { // Number of LEDs in buffer
+  uint8_t   mix;
+  uint16_t  weight1, weight2, byteNum, pixelNum, e;
+  uint8_t  *fillPtr = fillBuf + 1; // Skip initial per-pixel 0xFF marker
 
   weight2 = (uint16_t)w2 + 1; // 1-256
   weight1 = 257 - weight2;    // 1-256
 
-  for(byteNum = pixelNum = 0; pixelNum < NUM_LEDS; pixelNum++) {
+  for(byteNum = pixelNum = 0; pixelNum < numLEDs; pixelNum++) {
     // Interpolate red from rgbIn1 and rgbIn2 based on weightings
     mix = (rgbIn1[byteNum] * weight1 + rgbIn2[byteNum] * weight2) >> 8;
     // fracR is the fractional portion (0-255) of the 16-bit gamma-
@@ -215,45 +189,41 @@ void magic(
     // value is bumped up to the next brightness level and 256 is
     // subtracted from the error term before storing back in errR.
     // Diffusion dithering is the result.
-    if(e < 256) { // Cumulative error below threshold
-      rgbMix[byteNum++] = loR[mix]; // Use dimmer color
-    } else {      // Cumulative error at or above threshold
-      rgbMix[byteNum++] = hiR[mix]; // Use brighter color,
-      e                -= 256;      // reduce error value
+    if(e < 256) {                          // Error is below threshold,
+      fillPtr[DOTSTAR_REDBYTE] = loR[mix]; //  use dimmer color
+    } else {                               // Error at or above threshold,
+      fillPtr[DOTSTAR_REDBYTE] = hiR[mix]; //  use brighter color,
+      e                       -= 256;      //  reduce error value
     }
     errR[pixelNum] = e; // Store modified error term back in buffer
+    byteNum++;
 
     // Repeat same operations for green...
     mix = (rgbIn1[byteNum] * weight1 + rgbIn2[byteNum] * weight2) >> 8;
     if((e = (fracG[mix] + errG[pixelNum])) < 256) {
-      rgbMix[byteNum++] = loG[mix];
+      fillPtr[DOTSTAR_GREENBYTE] = loG[mix];
     } else {
-      rgbMix[byteNum++] = hiG[mix];
-      e                -= 256;
+      fillPtr[DOTSTAR_GREENBYTE] = hiG[mix];
+      e                         -= 256;
     }
     errG[pixelNum] = e;
+    byteNum++;
 
     // ...and blue...
     mix = (rgbIn1[byteNum] * weight1 + rgbIn2[byteNum] * weight2) >> 8;
     if((e = (fracB[mix] + errB[pixelNum])) < 256) {
-      rgbMix[byteNum++] = loB[mix];
+      fillPtr[DOTSTAR_BLUEBYTE] = loB[mix];
     } else {
-      rgbMix[byteNum++] = hiB[mix];
-      e                -= 256;
+      fillPtr[DOTSTAR_BLUEBYTE] = hiB[mix];
+      e                        -= 256;
     }
     errB[pixelNum] = e;
+    byteNum++;
+
+    fillPtr += 4; // Advance 4 bytes in dest buffer (0xFF + R + G + B)
   }
 
-  // Second pass: reorder rgbMix buffer into spiBuf.
-  uint16_t  i;
-  for(i=0; i<NUM_LEDS; i++) {
-    fillBuf[4 + i * 4] = 0xFF;
-    fillBuf[4 + i * 4 + 1 + DOTSTAR_REDBYTE]   = rgbMix[i * 3    ];
-    fillBuf[4 + i * 4 + 1 + DOTSTAR_GREENBYTE] = rgbMix[i * 3 + 1];
-    fillBuf[4 + i * 4 + 1 + DOTSTAR_BLUEBYTE]  = rgbMix[i * 3 + 2];
-  }
-
-  while(!spiReady);     // Wait for prior SPI DMA transfer to complete
+  while(!spiReady);      // Wait for prior SPI DMA transfer to complete
   SPI1.endTransaction(); // End prior transaction, start anew...
 
   // Set up DMA transfer using the newly-filled buffer as source...
@@ -269,8 +239,6 @@ void magic(
   spiReady = false;
   myDMA.start_transfer_job();
 }
-
-
 
 // OPC-HANDLING LOOP -------------------------------------------------------
 
@@ -290,23 +258,25 @@ void magic(
 #define MODE_DATA    1
 #define MODE_DISCARD 2
 uint8_t mode = MODE_HEADER;
+uint8_t headerBuf[4];
 
 // minBytesToProcess is a least amount of data that must be waiting from the
 // client before it's read...any less than this and it's ignored, we make
-// another pass through magic().  This is because magic() takes a moment to
-// run (about 2.5 ms) and we'd quickly fall behind if it was called every
+// another pass through magic().  This is because magic() can take a couple
+// milliseconds to run and we'd quickly fall behind if it was called every
 // time a single byte arrived.  Conversely, maxBytesToProcess sets an upper
 // limit for each pass, in order to keep the interpolation and dithering
 // going (reading full packets would stall that).
 uint16_t minBytesToProcess = 4, maxBytesToProcess = 4;
 // Both are initially set to 4 because that's the size of an OPC packet
 // header, and MODE_HEADER is the startup state.  The values change as we
-// switch between different dtates.
+// switch between different states.
 
 // bytesToRead is the number of bytes remaining in MODE_DATA, while
 // bytesRead is the number read so far (used as an index into a destination
 // buffer).  bytesToDiscard is the number remaining when in MODE_DISCARD.
-int16_t bytesToRead, bytesRead, bytesToDiscard;
+int16_t bytesToRead, bytesRead, bytesToDiscard,
+        numLEDs = NUM_LEDS, nextNumLEDs = NUM_LEDS;
 
 // There are three LED data buffers: one currently being read (not
 // displayed yet), the one most recently fully read (a complete RGB
@@ -316,65 +286,66 @@ int16_t bytesToRead, bytesRead, bytesToDiscard;
 // full RGB payload is received (resetting back to 0 as necessary).
 uint8_t bufPrior = 0, bufMostRecentlyRead = 1, bufBeingRead = 2;
 
-// For interpolation: lastFrameTime is the absolute time (in cycles) when
-// the most recent OPC pixel data packet was fully read.  timeBetweenFrames
-// is the interval (also in cycles) between lastFrameTime and the frame
-// before that.
-uint32_t lastFrameTime = 0, timeBetweenFrames = 0;
+// For interpolation: lastFrameTime is the absolute time (in microseconds)
+// when the most recent OPC pixel data packet was fully read.
+// timeBetweenFrames is the interval (also in cycles) between lastFrameTime
+// and the frame before that.  pt is a prior time (in seconds) used for
+// the updates-per-second estimate.
+uint32_t lastFrameTime = 0, timeBetweenFrames = 0, pt = 0, updates = 0;
 
-uint32_t ptime = 0L;
 void loop() {
   WiFiClient client = server.available();
   if(client) {
     Serial.println("new client");
     while(client.connected()) {
 
-// Show approx FPS
-      uint32_t t = micros();
-      Serial.println((1000000L / (t - ptime)));
-      ptime = t;
+      // Show approximage updates-per-second
+      uint32_t t = millis() / 1000; // Second counter
+      if(t != pt) {
+        Serial.print(updates);
+        Serial.println(" updates/sec");
+        pt      = t;
+        updates = 0;
+      }
 
-  // Interpolation weight (0-255) is the ratio of the time since last frame
-  // arrived to the prior two frames' interval.
-  uint32_t timeSinceFrameStart = micros() - lastFrameTime;
-  uint8_t  w = (timeSinceFrameStart >= timeBetweenFrames) ? 255 :
-               (int)(255.0 * (float)timeSinceFrameStart /
-                             (float)timeBetweenFrames);
-  // Fixed-point fails, why? 255L * timeSinceFrameStar / timeBetweenFrames;
+      // Interpolation weight (0-255) is the ratio of the time since last
+      // frame arrived to the prior two frames' interval.
+      uint32_t timeSinceFrameStart = micros() - lastFrameTime;
+      uint8_t  w = (timeSinceFrameStart >= timeBetweenFrames) ? 255 :
+                   (int)(255.0 * (float)timeSinceFrameStart /
+                                 (float)timeBetweenFrames);
+      // Fixed-point fails, why? 255L * timeSinceFrameStart / timeBetweenFrames;
 
-  magic(rgbBuf[bufPrior], rgbBuf[bufMostRecentlyRead], w,
-    spiBuffer[spiBufferBeingFilled]);
-  spiBufferBeingFilled = 1 - spiBufferBeingFilled;
+      magic(rgbBuf[bufPrior], rgbBuf[bufMostRecentlyRead], w,
+        spiBuffer[spiBufferBeingFilled], numLEDs);
+      spiBufferBeingFilled = 1 - spiBufferBeingFilled;
+      updates++;
 
       int16_t a = client.available(); // How much data awaits?
-      if(a > 0) Serial.println(a);
-//      while(a--) Serial.read();
-//      continue;
       if(a >= minBytesToProcess) {    // Enough to bother with?
-        if(a > maxBytesToProcess) a = maxBytesToProcess; // Yes, but set limit
+        if(a > maxBytesToProcess) a = maxBytesToProcess; // Yes, but limit
         if(mode == MODE_HEADER) {     // In header-reading mode...
-          client.read(rgbMix, 4);     // 4-bytes (borrow rgbMix to store)
-          uint16_t dataSize = (rgbMix[2] << 8) | rgbMix[3]; // Payload bytes
+          client.read(headerBuf, sizeof(headerBuf));
+          uint16_t dataSize = (headerBuf[2] << 8) | headerBuf[3]; // Payload
           if(dataSize) {                      // Non-zero?
-            mode              = MODE_DISCARD; // Assume DISCARD until validated
+            mode              = MODE_DISCARD; // Assume DISCARD until valid
             bytesToDiscard    = dataSize;     // May override below
-//            minBytesToProcess = 200;          // Hopefully keeps us ahead of
-//            maxBytesToProcess = 600;          // 1536 byte payloads @ 60 Hz
             minBytesToProcess = 512;          // Hopefully keeps us ahead of
             maxBytesToProcess = 1536;          // 1536 byte payloads @ 60 Hz
             if(minBytesToProcess > dataSize) minBytesToProcess = dataSize;
             if(maxBytesToProcess > dataSize) maxBytesToProcess = dataSize;
-            if(rgbMix[0] <= 1) {       // Valid channel?
-              if(rgbMix[1] == 0) {     // Valid command? (0 = pixel data)
+            if(headerBuf[0] <= 1) {    // Valid channel?
+              if(headerBuf[1] == 0) {  // Valid command? (0 = pixel data)
                 mode      = MODE_DATA; // YAY!
-                bytesRead = 0;                // Reset read counter
-                if(dataSize <= 1536) {        // 512 pixels
-                  bytesToRead     = dataSize; // Read all
-                  bytesToDiscard  = 0;        // Nothing to discard
-                } else {                      // >512 pixels
-                  bytesToRead     = 1536;     // Read first 512
-                  bytesToDiscard -= 1536;     // Discard rest
+                bytesRead = 0;                    // Reset read counter
+                if(dataSize <= (NUM_LEDS*3)) {    // <= NUM_LEDS
+                  bytesToRead     = dataSize;     // Read all
+                  bytesToDiscard  = 0;            // Nothing to discard
+                } else {                          // > NUM_LEDS
+                  bytesToRead     = (NUM_LEDS*3); // Read first NUM_LEDS
+                  bytesToDiscard -= (NUM_LEDS*3); // Discard rest
                 }
+                nextNumLEDs       = bytesToRead / 3;
               }
             }
           }
@@ -392,9 +363,12 @@ void loop() {
               bufPrior            = bufMostRecentlyRead;
               bufMostRecentlyRead = bufBeingRead;
               bufBeingRead        = (bufBeingRead + 1) % 3;
+              numLEDs             = nextNumLEDs;
               if(bytesToDiscard) {
-                mode = MODE_DISCARD;
-              } else {
+                mode              = MODE_DISCARD;
+                minBytesToProcess = 512;
+                maxBytesToProcess = 1536;
+             } else {
                 mode = MODE_HEADER;
                 minBytesToProcess = maxBytesToProcess = 4;
               }
@@ -406,22 +380,27 @@ void loop() {
             }
           }
         } else { // MODE_DISCARD
-          // rgbMix[] isn't used right now, it can serve as a 'bit bucket'
-          if((a = client.read(rgbMix, a)) > 0) {
-            bytesToDiscard -= a; // Decrement counter by amount actually read
-            if(bytesToDiscard <= 0) { // Done?  Switch to HEADER mode.
-              mode = MODE_HEADER;
-              minBytesToProcess = maxBytesToProcess = 4;
-            } else {
-              // Limit upper size of reads to actual remaining bytes
-              if(minBytesToProcess>bytesToRead) minBytesToProcess=bytesToRead;
-              if(maxBytesToProcess>bytesToRead) maxBytesToProcess=bytesToRead;
-            }
+          int16_t b;
+          while((a > 0) && ((b = client.read(headerBuf, sizeof(headerBuf))) > 0)) {
+            a              -= b; // Decrement counters by
+            bytesToDiscard -= b; // amount actually read
+          }
+          if(bytesToDiscard <= 0) { // Done?  Switch to HEADER mode.
+            mode = MODE_HEADER;
+            minBytesToProcess = maxBytesToProcess = 4;
+          } else {
+            // Limit upper size of reads to actual remaining bytes
+            if(minBytesToProcess>bytesToRead) minBytesToProcess=bytesToRead;
+            if(maxBytesToProcess>bytesToRead) maxBytesToProcess=bytesToRead;
           }
         }
       }
     }
     client.stop();
     Serial.println("client disonnected");
+    memset(rgbBuf, 0, sizeof(rgbBuf));
+    numLEDs = nextNumLEDs = 512;
+    magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], numLEDs);
+    spiBufferBeingFilled = 1 - spiBufferBeingFilled;
   }
 }
