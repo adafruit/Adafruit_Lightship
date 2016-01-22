@@ -30,12 +30,21 @@ or other way 'round).
 #include "utility/dmac.h"
 #include "utility/dma.h"
 
-#define Serial SerialUSB
+//#define Serial SerialUSB
 
 // CONFIG & GLOBALS --------------------------------------------------------
 
 char *ssid = "NETWORK_NAME",
      *pass = "NETWORK_PASSWORD";
+
+// Declare second SPI peripheral 'SPI1':
+SPIClass SPI1(      // 11/12/13 classic UNO-style SPI
+  &sercom1,         // -> Sercom peripheral
+  34,               // MISO pin (also digital pin 12)
+  37,               // SCK pin  (also digital pin 13)
+  35,               // MOSI pin (also digital pin 11)
+  SPI_PAD_0_SCK_1,  // TX pad (MOSI, SCK pads)
+  SERCOM_RX_PAD_3); // RX pad (MISO pad)
 
 Adafruit_ZeroDMA myDMA;
 
@@ -43,7 +52,7 @@ Adafruit_ZeroDMA myDMA;
 #define SPI_BUFFER_SIZE (4 + NUM_LEDS * 4 + ((NUM_LEDS / 2) + 7) / 8)
 // SPI buffer includes space for 32-bit '0' header, 32 bits per LED,
 // and footer of 1 bit per 2 LEDs (rounded to next byte boundary, for SPI).
-// For 512 pixels, that's 2084 bytes per SPI buffer (there's 2).
+// For 512 pixels, that's 2084 bytes per SPI buffer (x2 = 4168 bytes total).
 
 // Two equal-size SPI buffers are allocated; one's being filled with new
 // data as the other's being issued via DMA.
@@ -106,7 +115,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println("HELLO HELLO HELLO");
 
-  SPI.begin();
+  SPI.begin(); // For WiFi Shield 101
 
   // Connect to WiFi network
   Serial.println();
@@ -131,6 +140,17 @@ void setup() {
   // err buffers don't need init, they'll naturally reach equilibrium
 
   memset(rgbBuf, 0, sizeof(rgbBuf));
+
+  SPI1.begin(); // Init second SPI bus
+
+  // Configure DMA for SERCOM1 (our 'SPI1' port on 11/12/13)
+  Serial.println("Configuring");
+  myDMA.configure_peripheraltrigger(SERCOM1_DMAC_ID_TX);
+  myDMA.configure_triggeraction(DMA_TRIGGER_ACTON_BEAT);
+  myDMA.allocate();
+  myDMA.add_descriptor();
+  myDMA.register_callback(dma_callback);
+  myDMA.enable_callback();
 
   while(WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
@@ -234,26 +254,18 @@ void magic(
   }
 
   while(!spiReady);     // Wait for prior SPI DMA transfer to complete
-  SPI.endTransaction(); // End prior transaction, start anew...
-  myDMA.free();
+  SPI1.endTransaction(); // End prior transaction, start anew...
 
-  // SERMCOM4 == SPI native SERCOM
-  myDMA.configure_peripheraltrigger(SERCOM4_DMAC_ID_TX);
-  myDMA.configure_triggeraction(DMA_TRIGGER_ACTON_BEAT);
-  myDMA.allocate();
-
+  // Set up DMA transfer using the newly-filled buffer as source...
   myDMA.setup_transfer_descriptor(
     fillBuf,                          // Source address
-    (void *)(&SERCOM4->SPI.DATA.reg), // Dest address
+    (void *)(&SERCOM1->SPI.DATA.reg), // Dest address
     SPI_BUFFER_SIZE,                  // Data count
     DMA_BEAT_SIZE_BYTE,               // Bytes/halfwords/words
     true,                             // Increment source address
     false);                           // Don't increment dest
-  myDMA.add_descriptor();
-  myDMA.register_callback(dma_callback);
-  myDMA.enable_callback();
 
-  SPI.beginTransaction(SPISettings(12000000, MSBFIRST, SPI_MODE0));
+  SPI1.beginTransaction(SPISettings(12000000, MSBFIRST, SPI_MODE0));
   spiReady = false;
   myDMA.start_transfer_job();
 }
@@ -322,7 +334,6 @@ void loop() {
       Serial.println((1000000L / (t - ptime)));
       ptime = t;
 
-
   // Interpolation weight (0-255) is the ratio of the time since last frame
   // arrived to the prior two frames' interval.
   uint32_t timeSinceFrameStart = micros() - lastFrameTime;
@@ -335,9 +346,8 @@ void loop() {
     spiBuffer[spiBufferBeingFilled]);
   spiBufferBeingFilled = 1 - spiBufferBeingFilled;
 
-      
       int16_t a = client.available(); // How much data awaits?
-//      if(a > 0) Serial.println(a);
+      if(a > 0) Serial.println(a);
 //      while(a--) Serial.read();
 //      continue;
       if(a >= minBytesToProcess) {    // Enough to bother with?
