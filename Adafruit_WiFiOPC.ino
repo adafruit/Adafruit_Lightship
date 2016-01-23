@@ -61,8 +61,8 @@ uint8_t loR[256], hiR[256], fracR[256], errR[NUM_LEDS],
 // Order of color bytes as issued to the DotStar LEDs.  Current DotStars use
 // BRG order (blue=first, red=second, green=last); pre-2015 DotStars use GBR
 // order.  THESE RELATE ONLY TO THE LED STRIP; OPC data is always RGB order.
-#define DOTSTAR_GREENBYTE 0
-#define DOTSTAR_BLUEBYTE  1
+#define DOTSTAR_BLUEBYTE  0
+#define DOTSTAR_GREENBYTE 1
 #define DOTSTAR_REDBYTE   2
 
 Adafruit_ZeroDMA myDMA; // For DMA transfers
@@ -126,6 +126,9 @@ void setup() {
   memset(rgbBuf, 0, sizeof(rgbBuf));    // Clear receive buffers
 
   SPI1.begin();                         // Init second SPI bus
+  SPI1.beginTransaction(SPISettings(12000000, MSBFIRST, SPI_MODE0));
+  // Long DotStar stips may require reducing the SPI clock; if you see
+  // glitching, try setting to 8 MHz above.
 
   // Configure DMA for SERCOM1 (our 'SPI1' port on 11/12/13)
   myDMA.configure_peripheraltrigger(SERCOM1_DMAC_ID_TX);
@@ -221,7 +224,6 @@ void magic(
   }
 
   while(!spiReady);      // Wait for prior SPI DMA transfer to complete
-  SPI1.endTransaction(); // End prior transaction, start anew...
 
   // Set up DMA transfer using the newly-filled buffer as source...
   myDMA.setup_transfer_descriptor(
@@ -232,11 +234,8 @@ void magic(
     true,                             // Increment source address
     false);                           // Don't increment dest
 
-  // Long DotStar stips require reducing the SPI clock; 8 MHz seems
-  // OK for 256 pixels, may need to go slower for 512.
-  SPI1.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
-  spiReady = false;
   myDMA.start_transfer_job();
+  spiReady = false;
 }
 
 // OPC-HANDLING LOOP -------------------------------------------------------
