@@ -49,8 +49,9 @@ uint8_t spiBufferBeingFilled = 0;    // Index of currently-calculating buf
 volatile bool spiReady       = true; // True when SPI DMA ready for new data
 
 // Data for most-recently-received OPC color payload, payload before that,
-// and new in-progress payload currently arriving.  512 LEDs = 4608 bytes.
-uint8_t rgbBuf[3][NUM_LEDS * 3];
+// and new in-progress payload currently arriving.  Also, a 'sink' buffer
+// for quickly discarding data.
+uint8_t rgbBuf[4][NUM_LEDS * 3]; // 512 LEDs = 6144 bytes.
 
 // These tables (computed at runtime) are used for gamma correction and
 // dithering.  RAM used = 256*9+NUM_LEDS*3 bytes.  512 LEDs = 3840 bytes.
@@ -252,28 +253,15 @@ void magic(
 // packets or excess pixel data beyond what magic() supports) from the
 // client (this also operates on smaller chunks per pass).
 
-#define MODE_HEADER  0
-#define MODE_DATA    1
+#define MODE_DATA    0
+#define MODE_HEADER  1
 #define MODE_DISCARD 2
 uint8_t mode = MODE_HEADER;
-uint8_t headerBuf[4];
 
-// minBytesToProcess is a least amount of data that must be waiting from the
-// client before it's read...any less than this and it's ignored, we make
-// another pass through magic().  This is because magic() can take a couple
-// milliseconds to run and we'd quickly fall behind if it was called every
-// time a single byte arrived.  Conversely, maxBytesToProcess sets an upper
-// limit for each pass, in order to keep the interpolation and dithering
-// going (reading full packets would stall that).
-uint16_t minBytesToProcess = 4, maxBytesToProcess = 4;
-// Both are initially set to 4 because that's the size of an OPC packet
-// header, and MODE_HEADER is the startup state.  The values change as we
-// switch between different states.
-
-// bytesToRead is the number of bytes remaining in MODE_DATA, while
+// bytesToRead is the number of bytes remaining in current mode, while
 // bytesRead is the number read so far (used as an index into a destination
 // buffer).  bytesToDiscard is the number remaining when in MODE_DISCARD.
-int16_t bytesToRead, bytesRead, bytesToDiscard,
+int16_t bytesToRead = 0, bytesRead = 0, bytesToDiscard = 0,
         numLEDs = NUM_LEDS, nextNumLEDs = NUM_LEDS;
 
 // There are three LED data buffers: one currently being read (not
@@ -283,117 +271,131 @@ int16_t bytesToRead, bytesRead, bytesToDiscard,
 // These indices keep track of each, and all are incremented whenever a
 // full RGB payload is received (resetting back to 0 as necessary).
 uint8_t bufPrior = 0, bufMostRecentlyRead = 1, bufBeingRead = 2;
+// There's also a fourth RGB buffer used as a 'bit bucket' when discarding
+// data quickly.  It's always index #3 and doesn't need a variable.
 
 // For interpolation: lastFrameTime is the absolute time (in microseconds)
 // when the most recent OPC pixel data packet was fully read.
 // timeBetweenFrames is the interval (also in cycles) between lastFrameTime
-// and the frame before that.  pt is a prior time (in seconds) used for
-// the updates-per-second estimate.
-uint32_t lastFrameTime = 0, timeBetweenFrames = 0, pt = 0, updates = 0;
+// and the frame before that.  updates and priorSeconds are used for the
+// updates-per-second estimate.
+uint32_t lastFrameTime = 0, timeBetweenFrames = 0,
+         updates = 0, priorSeconds  = 0;
 
 void loop() {
   WiFiClient client = server.available();
   if(client) {
+    uint32_t t, timeSinceFrameStart, seconds;
+    int16_t  a, bytesPending, dataSize;
+    uint8_t  w;
     Serial.println("new client");
     while(client.connected()) {
 
+      // DITHER-AND-RECEIVE LOOP STARTS HERE -------------------------------
+
       // Interpolation weight (0-255) is the ratio of the time since last
       // frame arrived to the prior two frames' interval.
-      uint32_t timeSinceFrameStart = micros() - lastFrameTime;
-      uint8_t  w = (timeSinceFrameStart >= timeBetweenFrames) ? 255 :
-                   (255L * timeSinceFrameStart / timeBetweenFrames);
+      t                   = micros();          // Current time
+      timeSinceFrameStart = t - lastFrameTime; // Elapsed since data recv'd
+      w                   = (timeSinceFrameStart >= timeBetweenFrames) ? 255 :
+                            (255L * timeSinceFrameStart / timeBetweenFrames);
 
       magic(rgbBuf[bufPrior], rgbBuf[bufMostRecentlyRead], w,
         spiBuffer[spiBufferBeingFilled], numLEDs);
       spiBufferBeingFilled = 1 - spiBufferBeingFilled;
       updates++;
 
-      // Show approximage updates-per-second
-      uint32_t t = millis() / 1000; // Second counter
-      if(t != pt) {
+      // Show approximate updates-per-second
+      if((seconds = (t / 1000000)) != priorSeconds) { // 1 sec elapsed?
         Serial.print(updates);
         Serial.println(" updates/sec");
-        pt      = t;
-        updates = 0;
+        priorSeconds = seconds;
+        updates      = 0; // Reset counter
       }
 
-      int16_t a = client.available(); // How much data awaits?
-      if(a >= minBytesToProcess) {    // Enough to bother with?
-        if(a > maxBytesToProcess) a = maxBytesToProcess; // Yes, but limit
-        if(mode == MODE_HEADER) {     // In header-reading mode...
-          client.read(headerBuf, sizeof(headerBuf));
-          uint16_t dataSize = (headerBuf[2] << 8) | headerBuf[3]; // Payload
-          if(dataSize) {                      // Non-zero?
-            mode              = MODE_DISCARD; // Assume DISCARD until valid
-            bytesToDiscard    = dataSize;     // May override below
-            minBytesToProcess = 512;          // Hopefully keeps us ahead of
-            maxBytesToProcess = 1536;          // 1536 byte payloads @ 60 Hz
-            if(minBytesToProcess > dataSize) minBytesToProcess = dataSize;
-            if(maxBytesToProcess > dataSize) maxBytesToProcess = dataSize;
-            if(headerBuf[0] <= 1) {    // Valid channel?
-              if(headerBuf[1] == 0) {  // Valid command? (0 = pixel data)
-                mode      = MODE_DATA; // YAY!
-                bytesRead = 0;                    // Reset read counter
-                if(dataSize <= (NUM_LEDS*3)) {    // <= NUM_LEDS
-                  bytesToRead     = dataSize;     // Read all
-                  bytesToDiscard  = 0;            // Nothing to discard
-                } else {                          // > NUM_LEDS
-                  bytesToRead     = (NUM_LEDS*3); // Read first NUM_LEDS
-                  bytesToDiscard -= (NUM_LEDS*3); // Discard rest
-                }
-                nextNumLEDs       = bytesToRead / 3;
+      // Process up to 1/2 of pending data on stream.  Rather than waiting
+      // for full packets to arrive, this interleaves Stream I/O with LED
+      // dithering so the latter doesn't get too 'stuttery.'  It DOES
+      // however limit the potential throughput; 256 LEDs seems fine at
+      // 60 FPS, but with 512 you may need to limit it to 30 FPS.
+      if(bytesPending = client.available()) {  // Any incoming data?
+        bytesPending = (bytesPending + 1) / 2; // Handle a fraction of it
+        do {
+          if(mode == MODE_DATA) { // Receiving pixel data, most likely case
+            // Read size mustn't exceed remaining pixel payload size or pixel buffer size.
+            // This avoids some ugly cases like the next pixel header appearing mid-buffer,
+            // which would require nasty memmoves and stuff.  We'll read some now and pick
+            // up the rest on the next pass through.
+            if(bytesPending > bytesToRead)       bytesPending = bytesToRead;
+            if(bytesPending > sizeof(rgbBuf[0])) bytesPending = sizeof(rgbBuf[0]);
+            if((a = client.read(&rgbBuf[bufBeingRead][bytesRead], bytesPending)) > 0) {
+              bytesPending -= a;
+              bytesToRead  -= a;
+              if(bytesToRead <= 0) { // End of pixel payload?
+                // END OF PIXEL DATA.  Record arrival time and interval since
+                // last frame, advance buffer indices, switch to HEADER mode
+                // if end of packet, else to DISCARD mode for any remainders.
+                t                   = micros();
+                timeBetweenFrames   = t - lastFrameTime;
+                lastFrameTime       = t;
+                bufPrior            = bufMostRecentlyRead; // Cycle buffers
+                bufMostRecentlyRead = bufBeingRead;
+                bufBeingRead        = (bufBeingRead + 1) % 3;
+                numLEDs             = nextNumLEDs;
+                mode                = bytesToDiscard ? MODE_DISCARD : MODE_HEADER;
+                bytesRead           = 0; // Reset index
+              } else {
+                bytesRead += a; // Advance index & keep reading
+              }
+            } // else no data received
+          } else if(mode == MODE_HEADER) {         // Receiving header data
+            if(bytesPending > 4) bytesPending = 4; // Limit read length to header size
+            if((a = client.read(&rgbBuf[bufBeingRead][bytesRead], bytesPending)) > 0) {
+              bytesRead    += a;
+              bytesPending -= a;
+              if(bytesPending <= 0) { // Full header received, parse it!
+                bytesRead = 0;        // Reset read buffer index
+                dataSize  = (rgbBuf[bufBeingRead][2] << 8) | rgbBuf[bufBeingRead][3];
+                if(dataSize > 0) {                           // Payload size > 0?
+                  mode           = MODE_DISCARD;             // Assume DISCARD until validated,
+                  bytesToDiscard = dataSize;                 // may override below
+                  if(rgbBuf[bufBeingRead][0] <= 1) {         // Valid channel?
+                    if(rgbBuf[bufBeingRead][1] == 0) {       // Valid command? (0 = pixel data)
+                      // Valid!  Switch to DATA mode, set up counters...
+                      mode              = MODE_DATA;
+                      if(dataSize <= sizeof(rgbBuf[0])) {    // <= NUM_LEDS
+                        bytesToRead     = dataSize;          // Read all
+                        bytesToDiscard  = 0;                 // Nothing to discard
+                      } else {                               // > NUM_LEDS
+                        bytesToRead     = sizeof(rgbBuf[0]); // Read first NUM_LEDS
+                        bytesToDiscard -= sizeof(rgbBuf[0]); // Discard rest
+                      }
+                      nextNumLEDs       = bytesToRead / 3; // Save pixel count for completion
+                    } // endif valid command
+                  } // endif valid channel
+                } // else 0-byte payload; remain in HEADER mode
+              } // else full header not yet received; remain in HEADER mode
+            } // else no data received
+          } else { // MODE_DISCARD
+            // Read size mustn't exceed remaining discard size or pixel buffer size
+            if(bytesPending >= bytesToDiscard)   bytesPending = bytesToDiscard;
+            if(bytesPending > sizeof(rgbBuf[3])) bytesPending = sizeof(rgbBuf[3]);
+            if((a = client.read(&rgbBuf[3][0], bytesPending)) > 0) { // Into bit bucket
+              bytesPending -= a;
+              if(bytesPending <= 0) { // End of DISCARD mode,
+                mode = MODE_HEADER;   // switch back to HEADER mode
               }
             }
-          }
-        } else if(mode == MODE_DATA) {
-          // Read data into bufBeingRead at current bytesRead index
-          if((a = client.read(&rgbBuf[bufBeingRead][bytesRead], a)) > 0) {
-            bytesToRead -= a;      // Decrement counter by amt actually read
-            if(bytesToRead <= 0) { // Done?
-              // END OF PIXEL DATA.  Record arrival time and interval since
-              // last frame, advance buffer indices, switch to HEADER mode
-              // if end of packet, else to DISCARD mode for any remainders.
-              uint32_t t          = micros();
-              timeBetweenFrames   = t - lastFrameTime;
-              lastFrameTime       = t;
-              bufPrior            = bufMostRecentlyRead;
-              bufMostRecentlyRead = bufBeingRead;
-              bufBeingRead        = (bufBeingRead + 1) % 3;
-              numLEDs             = nextNumLEDs;
-              if(bytesToDiscard) {
-                mode              = MODE_DISCARD;
-                minBytesToProcess = 512;
-                maxBytesToProcess = 1536;
-             } else {
-                mode = MODE_HEADER;
-                minBytesToProcess = maxBytesToProcess = 4;
-              }
-            } else { // Not done yet
-              bytesRead += a; // Advance bytes-read counter
-              // Limit upper size of reads to actual remaining bytes
-              if(minBytesToProcess>bytesToRead) minBytesToProcess=bytesToRead;
-              if(maxBytesToProcess>bytesToRead) maxBytesToProcess=bytesToRead;
-            }
-          }
-        } else { // MODE_DISCARD
-          int16_t b;
-          while((a > 0) && ((b = client.read(headerBuf, sizeof(headerBuf))) > 0)) {
-            a              -= b; // Decrement counters by
-            bytesToDiscard -= b; // amount actually read
-          }
-          if(bytesToDiscard <= 0) { // Done?  Switch to HEADER mode.
-            mode = MODE_HEADER;
-            minBytesToProcess = maxBytesToProcess = 4;
-          } else {
-            // Limit upper size of reads to actual remaining bytes
-            if(minBytesToProcess>bytesToRead) minBytesToProcess=bytesToRead;
-            if(maxBytesToProcess>bytesToRead) maxBytesToProcess=bytesToRead;
-          }
-        }
-      }
-    }
+          } // end MODE_DISCARD
+        } while(bytesPending > 0);
+      } // end if client.available()
+
+      // DITHER-AND-RECEIVE LOOP ENDS HERE ---------------------------------
+
+    } // end while client connected
     client.stop();
     Serial.println("client disonnected");
+    // Clear buffers and turn off LEDs:
     memset(rgbBuf, 0, sizeof(rgbBuf));
     numLEDs = nextNumLEDs = 512;
     magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], numLEDs);
