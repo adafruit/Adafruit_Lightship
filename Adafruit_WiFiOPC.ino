@@ -167,7 +167,7 @@ void magic(
  uint16_t numLEDs) { // Number of LEDs in buffer
   uint8_t   mix;
   uint16_t  weight1, weight2, byteNum, pixelNum, e;
-  uint8_t  *fillPtr = fillBuf + 1; // Skip initial per-pixel 0xFF marker
+  uint8_t  *fillPtr = fillBuf + 5; // Skip 4-byte header + 1 byte pixel marker
 
   weight2 = (uint16_t)w2 + 1; // 1-256
   weight1 = 257 - weight2;    // 1-256
@@ -298,6 +298,17 @@ void loop() {
     Serial.println("new client");
     while(client.connected()) {
 
+      // Interpolation weight (0-255) is the ratio of the time since last
+      // frame arrived to the prior two frames' interval.
+      uint32_t timeSinceFrameStart = micros() - lastFrameTime;
+      uint8_t  w = (timeSinceFrameStart >= timeBetweenFrames) ? 255 :
+                   (255L * timeSinceFrameStart / timeBetweenFrames);
+
+      magic(rgbBuf[bufPrior], rgbBuf[bufMostRecentlyRead], w,
+        spiBuffer[spiBufferBeingFilled], numLEDs);
+      spiBufferBeingFilled = 1 - spiBufferBeingFilled;
+      updates++;
+
       // Show approximage updates-per-second
       uint32_t t = millis() / 1000; // Second counter
       if(t != pt) {
@@ -306,19 +317,6 @@ void loop() {
         pt      = t;
         updates = 0;
       }
-
-      // Interpolation weight (0-255) is the ratio of the time since last
-      // frame arrived to the prior two frames' interval.
-      uint32_t timeSinceFrameStart = micros() - lastFrameTime;
-      uint8_t  w = (timeSinceFrameStart >= timeBetweenFrames) ? 255 :
-                   (int)(255.0 * (float)timeSinceFrameStart /
-                                 (float)timeBetweenFrames);
-      // Fixed-point fails, why? 255L * timeSinceFrameStart / timeBetweenFrames;
-
-      magic(rgbBuf[bufPrior], rgbBuf[bufMostRecentlyRead], w,
-        spiBuffer[spiBufferBeingFilled], numLEDs);
-      spiBufferBeingFilled = 1 - spiBufferBeingFilled;
-      updates++;
 
       int16_t a = client.available(); // How much data awaits?
       if(a >= minBytesToProcess) {    // Enough to bother with?
