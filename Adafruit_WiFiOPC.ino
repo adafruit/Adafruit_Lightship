@@ -8,7 +8,7 @@
 //   Arduino Zero:             https://www.adafruit.com/products/2843
 //   and WiFi Shield 101:      https://www.adafruit.com/products/2891
 // OR:
-//   Adafruit Feather M0 WiFi: https://www.adafruit.com/products/TBD
+//   Adafruit Feather M0 WiFi: https://www.adafruit.com/products/3010
 // Plus a length of DotStar LEDs (strip, matrix, etc.) and a power source.
 
 #include <SPI.h>
@@ -18,7 +18,7 @@
 #include "utility/dmac.h"
 #include "utility/dma.h"
 
-//#define Serial SerialUSB // Enable this if using 'Native USB' port
+//#define Serial SerialUSB // Enable if using Arduino Zero 'Native USB' port
 
 // CONFIG & GLOBALS --------------------------------------------------------
 
@@ -66,9 +66,6 @@ uint8_t loR[256], hiR[256], fracR[256], errR[NUM_LEDS],
 #define DOTSTAR_REDBYTE   2
 
 Adafruit_ZeroDMA myDMA; // For DMA transfers
-
-// Used for interpolation.  512 LEDs = 1536 bytes.
-//uint8_t rgbMix[NUM_LEDS * 3];
 
 // UTILITY FUNCTIONS -------------------------------------------------------
 
@@ -235,7 +232,9 @@ void magic(
     true,                             // Increment source address
     false);                           // Don't increment dest
 
-  SPI1.beginTransaction(SPISettings(12000000, MSBFIRST, SPI_MODE0));
+  // Long DotStar stips require reducing the SPI clock; 8 MHz seems
+  // OK for 256 pixels, may need to go slower for 512.
+  SPI1.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
   spiReady = false;
   myDMA.start_transfer_job();
 }
