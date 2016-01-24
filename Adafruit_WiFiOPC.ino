@@ -17,22 +17,23 @@
 #include <Adafruit_ASFcore.h>
 #include "utility/dmac.h"
 #include "utility/dma.h"
+#include "wiring_private.h" // pinPeripheral() function
 
 //#define Serial SerialUSB // Enable if using Arduino Zero 'Native USB' port
 
 // CONFIG & GLOBALS --------------------------------------------------------
 
-char      *ssid = "NETWORK_NAME",  // WiFi credentials
-          *pass = "NETWORK_PASSWORD";
-#define    INPORT  7890            // TCP port to listen on
+char      *ssid = "WIFI_NAME",  // WiFi credentials
+          *pass = "WIFI_PASSWORD";
+#define    INPORT  7890         // TCP port to listen on
 WiFiServer server(INPORT);
 
 // Declare second SPI peripheral 'SPI1':
 SPIClass SPI1(      // 11/12/13 classic UNO-style SPI
   &sercom1,         // -> Sercom peripheral
-  34,               // MISO pin (also digital pin 12)
-  37,               // SCK pin  (also digital pin 13)
-  35,               // MOSI pin (also digital pin 11)
+  12,               // MISO pin
+  13,               // SCK pin
+  11,               // MOSI pin
   SPI_PAD_0_SCK_1,  // TX pad (for MOSI, SCK)
   SERCOM_RX_PAD_3); // RX pad (for MISO)
 
@@ -124,9 +125,11 @@ void setup() {
   fillGamma(2.7, 255, loB, hiB, fracB); // override this later).
   // err buffers don't need init, they'll naturally reach equilibrium
 
-  memset(rgbBuf, 0, sizeof(rgbBuf));    // Clear receive buffers
+  memset(rgbBuf, 0, sizeof(rgbBuf)); // Clear receive buffers
 
-  SPI1.begin();                         // Init second SPI bus
+  SPI1.begin();                  // Init second SPI bus
+  pinPeripheral(11, PIO_SERCOM); // Enable SERCOM MOSI on this pin
+  pinPeripheral(13, PIO_SERCOM); // Ditto, SERCOM SCK
   SPI1.beginTransaction(SPISettings(12000000, MSBFIRST, SPI_MODE0));
   // Long DotStar stips may require reducing the SPI clock; if you see
   // glitching, try setting to 8 MHz above.
