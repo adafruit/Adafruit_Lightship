@@ -173,15 +173,15 @@ void magic(
  uint8_t *fillBuf,   // SPI data buffer being filled (DotStar-native order)
  uint16_t numLEDs) { // Number of LEDs in buffer
   uint8_t   mix;
-  uint16_t  weight1, weight2, byteNum, pixelNum, e;
+  uint16_t  weight1, weight2, pixelNum, e;
   uint8_t  *fillPtr = fillBuf + 5; // Skip 4-byte header + 1 byte pixel marker
 
   weight2 = (uint16_t)w2 + 1; // 1-256
   weight1 = 257 - weight2;    // 1-256
 
-  for(byteNum = pixelNum = 0; pixelNum < numLEDs; pixelNum++) {
+  for(pixelNum = 0; pixelNum < numLEDs; pixelNum++, fillPtr += 4) {
     // Interpolate red from rgbIn1 and rgbIn2 based on weightings
-    mix = (rgbIn1[byteNum] * weight1 + rgbIn2[byteNum] * weight2) >> 8;
+    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
     // fracR is the fractional portion (0-255) of the 16-bit gamma-
     // corrected value for a given red brightness...essentially it's
     // how far 'off' a given 8-bit brightness value is from its ideal.
@@ -193,41 +193,26 @@ void magic(
     // value is bumped up to the next brightness level and 256 is
     // subtracted from the error term before storing back in errR.
     // Diffusion dithering is the result.
-    if(e < 256) {                          // Error is below threshold,
-      fillPtr[DOTSTAR_REDBYTE] = loR[mix]; //  use dimmer color
-    } else {                               // Error at or above threshold,
-      fillPtr[DOTSTAR_REDBYTE] = hiR[mix]; //  use brighter color,
-      e                       -= 256;      //  reduce error value
-    }
-    errR[pixelNum] = e; // Store modified error term back in buffer
-    byteNum++;
+    fillPtr[DOTSTAR_REDBYTE] = (e < 256) ? loR[mix] : hiR[mix];
+    // If e exceeds 256, it *should* be reduced by 256 at this point...
+    // but rather than subtract, we just rely on truncation in the 8-bit
+    // store operation below to do this implicitly. (e & 0xFF)
+    errR[pixelNum] = e;
 
     // Repeat same operations for green...
-    mix = (rgbIn1[byteNum] * weight1 + rgbIn2[byteNum] * weight2) >> 8;
-    if((e = (fracG[mix] + errG[pixelNum])) < 256) {
-      fillPtr[DOTSTAR_GREENBYTE] = loG[mix];
-    } else {
-      fillPtr[DOTSTAR_GREENBYTE] = hiG[mix];
-      e                         -= 256;
-    }
+    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
+    e   = fracG[mix] + errG[pixelNum];
+    fillPtr[DOTSTAR_GREENBYTE] = (e < 256) ? loG[mix] : hiG[mix];
     errG[pixelNum] = e;
-    byteNum++;
 
     // ...and blue...
-    mix = (rgbIn1[byteNum] * weight1 + rgbIn2[byteNum] * weight2) >> 8;
-    if((e = (fracB[mix] + errB[pixelNum])) < 256) {
-      fillPtr[DOTSTAR_BLUEBYTE] = loB[mix];
-    } else {
-      fillPtr[DOTSTAR_BLUEBYTE] = hiB[mix];
-      e                        -= 256;
-    }
+    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
+    e   = fracB[mix] + errB[pixelNum];
+    fillPtr[DOTSTAR_BLUEBYTE] = (e < 256) ? loB[mix] : hiB[mix];
     errB[pixelNum] = e;
-    byteNum++;
-
-    fillPtr += 4; // Advance 4 bytes in dest buffer (0xFF + R + G + B)
   }
 
-  while(!spiReady);      // Wait for prior SPI DMA transfer to complete
+  while(!spiReady); // Wait for prior SPI DMA transfer to complete
 
   // Set up DMA transfer using the newly-filled buffer as source...
   myDMA.setup_transfer_descriptor(
