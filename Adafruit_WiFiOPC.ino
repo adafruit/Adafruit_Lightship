@@ -36,8 +36,8 @@ SPIClass SPI1(      // 11/12/13 classic UNO-style SPI
   SPI_PAD_0_SCK_1,  // TX pad (for MOSI, SCK)
   SERCOM_RX_PAD_3); // RX pad (for MISO)
 
-#define NUM_LEDS        512 // Upper limit; OK to receive data for fewer
-#define SPI_BUFFER_SIZE (4 + NUM_LEDS * 4 + ((NUM_LEDS / 2) + 7) / 8)
+#define MAX_LEDS        512 // Upper limit; OK to receive data for fewer
+#define SPI_BUFFER_SIZE (4 + MAX_LEDS * 4 + ((MAX_LEDS / 2) + 7) / 8)
 // SPI buffer includes space for DotStar 32-bit '0' header, 32 bits per LED,
 // and footer of 1 bit per 2 LEDs (rounded to next byte boundary, for SPI).
 // For 512 pixels, that's 2084 bytes per SPI buffer (x2 = 4168 bytes total).
@@ -51,13 +51,13 @@ volatile bool spiReady       = true; // True when SPI DMA ready for new data
 // Data for most-recently-received OPC color payload, payload before that,
 // and new in-progress payload currently arriving.  Also, a 'sink' buffer
 // for quickly discarding data.
-uint8_t rgbBuf[4][NUM_LEDS * 3]; // 512 LEDs = 6144 bytes.
+uint8_t rgbBuf[4][MAX_LEDS * 3]; // 512 LEDs = 6144 bytes.
 
 // These tables (computed at runtime) are used for gamma correction and
-// dithering.  RAM used = 256*9+NUM_LEDS*3 bytes.  512 LEDs = 3840 bytes.
-uint8_t loR[256], hiR[256], fracR[256], errR[NUM_LEDS],
-        loG[256], hiG[256], fracG[256], errG[NUM_LEDS],
-        loB[256], hiB[256], fracB[256], errB[NUM_LEDS];
+// dithering.  RAM used = 256*9+MAX_LEDS*3 bytes.  512 LEDs = 3840 bytes.
+uint8_t loR[256], hiR[256], fracR[256], errR[MAX_LEDS],
+        loG[256], hiG[256], fracG[256], errG[MAX_LEDS],
+        loB[256], hiB[256], fracB[256], errB[MAX_LEDS];
 
 // Order of color bytes as issued to the DotStar LEDs.  Current DotStars use
 // BRG order (blue=first, red=second, green=last); pre-2015 DotStars use GBR
@@ -140,7 +140,7 @@ void setup() {
   myDMA.enable_callback();
 
   // Turn off LEDs
-  magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], NUM_LEDS);
+  magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], MAX_LEDS);
   spiBufferBeingFilled = 1 - spiBufferBeingFilled;
 
   while(WiFi.status() != WL_CONNECTED) {
@@ -262,7 +262,7 @@ uint8_t mode = MODE_HEADER;
 // bytesRead is the number read so far (used as an index into a destination
 // buffer).  bytesToDiscard is the number remaining when in MODE_DISCARD.
 int16_t bytesToRead = 0, bytesRead = 0, bytesToDiscard = 0,
-        numLEDs = NUM_LEDS, nextNumLEDs = NUM_LEDS;
+        numLEDs = MAX_LEDS, nextNumLEDs = MAX_LEDS;
 
 // There are three LED data buffers: one currently being read (not
 // displayed yet), the one most recently fully read (a complete RGB
@@ -322,13 +322,15 @@ void loop() {
         bytesPending = (bytesPending + 1) / 2; // Handle a fraction of it
         do {
           if(mode == MODE_DATA) { // Receiving pixel data, most likely case
-            // Read size mustn't exceed remaining pixel payload size or pixel buffer size.
-            // This avoids some ugly cases like the next pixel header appearing mid-buffer,
-            // which would require nasty memmoves and stuff.  We'll read some now and pick
-            // up the rest on the next pass through.
-            if(bytesPending > bytesToRead)       bytesPending = bytesToRead;
-            if(bytesPending > sizeof(rgbBuf[0])) bytesPending = sizeof(rgbBuf[0]);
-            if((a = client.read(&rgbBuf[bufBeingRead][bytesRead], bytesPending)) > 0) {
+            // Read size mustn't exceed remaining pixel payload size or pixel
+            // buffer size. This avoids some ugly cases like the next pixel
+            //header appearing mid-buffer, which would require nasty memmoves
+            // and stuff.  We'll read some now and pick up the rest on the
+            // next pass through.
+            if(bytesPending>bytesToRead)       bytesPending=bytesToRead;
+            if(bytesPending>sizeof(rgbBuf[0])) bytesPending=sizeof(rgbBuf[0]);
+            if((a = client.read(&rgbBuf[bufBeingRead][bytesRead],
+             bytesPending)) > 0) {
               bytesPending -= a;
               bytesToRead  -= a;
               if(bytesToRead <= 0) { // End of pixel payload?
@@ -342,45 +344,47 @@ void loop() {
                 bufMostRecentlyRead = bufBeingRead;
                 bufBeingRead        = (bufBeingRead + 1) % 3;
                 numLEDs             = nextNumLEDs;
-                mode                = bytesToDiscard ? MODE_DISCARD : MODE_HEADER;
                 bytesRead           = 0; // Reset index
+                mode = bytesToDiscard ? MODE_DISCARD : MODE_HEADER;
               } else {
                 bytesRead += a; // Advance index & keep reading
               }
             } // else no data received
           } else if(mode == MODE_HEADER) {         // Receiving header data
-            if(bytesPending > 4) bytesPending = 4; // Limit read length to header size
-            if((a = client.read(&rgbBuf[bufBeingRead][bytesRead], bytesPending)) > 0) {
+            if(bytesPending > 4) bytesPending = 4; // Limit to header size
+            if((a = client.read(&rgbBuf[bufBeingRead][bytesRead],
+             bytesPending)) > 0) {
               bytesRead    += a;
               bytesPending -= a;
               if(bytesPending <= 0) { // Full header received, parse it!
                 bytesRead = 0;        // Reset read buffer index
-                dataSize  = (rgbBuf[bufBeingRead][2] << 8) | rgbBuf[bufBeingRead][3];
-                if(dataSize > 0) {                           // Payload size > 0?
-                  mode           = MODE_DISCARD;             // Assume DISCARD until validated,
-                  bytesToDiscard = dataSize;                 // may override below
-                  if(rgbBuf[bufBeingRead][0] <= 1) {         // Valid channel?
-                    if(rgbBuf[bufBeingRead][1] == 0) {       // Valid command? (0 = pixel data)
+                dataSize  = (rgbBuf[bufBeingRead][2] << 8) |
+                             rgbBuf[bufBeingRead][3];
+                if(dataSize > 0) {           // Payload size > 0?
+                  mode = MODE_DISCARD;       // Assume DISCARD until validated,
+                  bytesToDiscard = dataSize; // may override below
+                  if(rgbBuf[bufBeingRead][0] <= 1) {   // Valid channel?
+                    if(rgbBuf[bufBeingRead][1] == 0) { // Pixel data command?
                       // Valid!  Switch to DATA mode, set up counters...
-                      mode              = MODE_DATA;
-                      if(dataSize <= sizeof(rgbBuf[0])) {    // <= NUM_LEDS
-                        bytesToRead     = dataSize;          // Read all
-                        bytesToDiscard  = 0;                 // Nothing to discard
-                      } else {                               // > NUM_LEDS
-                        bytesToRead     = sizeof(rgbBuf[0]); // Read first NUM_LEDS
-                        bytesToDiscard -= sizeof(rgbBuf[0]); // Discard rest
+                      mode = MODE_DATA;
+                      if(dataSize <= sizeof(rgbBuf[0])) {    // <= MAX_LEDS
+                        bytesToRead     = dataSize;          // Read all,
+                        bytesToDiscard  = 0;                 // no discard
+                      } else {                               // > MAX_LEDS
+                        bytesToRead     = sizeof(rgbBuf[0]); // Read MAX_LEDS,
+                        bytesToDiscard -= sizeof(rgbBuf[0]); // discard rest
                       }
-                      nextNumLEDs       = bytesToRead / 3; // Save pixel count for completion
+                      nextNumLEDs = bytesToRead / 3; // Pixel count when done
                     } // endif valid command
                   } // endif valid channel
                 } // else 0-byte payload; remain in HEADER mode
               } // else full header not yet received; remain in HEADER mode
             } // else no data received
           } else { // MODE_DISCARD
-            // Read size mustn't exceed remaining discard size or pixel buffer size
-            if(bytesPending >= bytesToDiscard)   bytesPending = bytesToDiscard;
-            if(bytesPending > sizeof(rgbBuf[3])) bytesPending = sizeof(rgbBuf[3]);
-            if((a = client.read(&rgbBuf[3][0], bytesPending)) > 0) { // Into bit bucket
+            // Read size mustn't exceed discard size or pixel buffer size
+            if(bytesPending>bytesToDiscard)    bytesPending=bytesToDiscard;
+            if(bytesPending>sizeof(rgbBuf[3])) bytesPending=sizeof(rgbBuf[3]);
+            if((a = client.read(&rgbBuf[3][0], bytesPending)) > 0) { // Poof!
               bytesPending -= a;
               if(bytesPending <= 0) { // End of DISCARD mode,
                 mode = MODE_HEADER;   // switch back to HEADER mode
