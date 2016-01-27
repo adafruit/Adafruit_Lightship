@@ -23,9 +23,10 @@
 
 // CONFIG & GLOBALS --------------------------------------------------------
 
-char      *ssid = "WIFI_NAME",  // WiFi credentials
-          *pass = "WIFI_PASSWORD";
-#define    INPORT  7890         // TCP port to listen on
+char      *ssid = "NETWORK_NAME",   // WiFi credentials
+          *pass = "NETWORK_PASSWORD";
+IPAddress  ipaddr(192, 168, 0, 60); // OPTIONAL: static IP address
+#define    INPORT  7890             // Incoming TCP port to listen on
 WiFiServer server(INPORT);
 
 // Declare second SPI peripheral 'SPI1':
@@ -108,6 +109,7 @@ void setup() {
   Serial.print("Connecting to ");
   Serial.print(ssid);
   Serial.print("..");
+  WiFi.config(ipaddr);    // If using static IP
   WiFi.begin(ssid, pass);
 
   // Do some other init while WiFi starts up...
@@ -185,9 +187,8 @@ void magic(
     // fracR is the fractional portion (0-255) of the 16-bit gamma-
     // corrected value for a given red brightness...essentially it's
     // how far 'off' a given 8-bit brightness value is from its ideal.
-    // This error is carried forward to the next pixel (and on down
-    // the line) in the errR buffer...added to the fracR value for the
-    // current pixel...
+    // This error is carried forward to the next frame in the errR
+    // buffer...added to the fracR value for the current pixel...
     e = fracR[mix] + errR[pixelNum];
     // ...if this accumulated value exceeds 255, the resulting red
     // value is bumped up to the next brightness level and 256 is
