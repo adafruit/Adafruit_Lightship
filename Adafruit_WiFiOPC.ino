@@ -5,10 +5,10 @@
 // the animation, runs on a regular computer running the Processing
 // language (www.processing.org).
 // Requires either:
+//   Adafruit Feather M0 WiFi: https://www.adafruit.com/products/3010
+// OR:
 //   Arduino Zero:             https://www.adafruit.com/products/2843
 //   and WiFi Shield 101:      https://www.adafruit.com/products/2891
-// OR:
-//   Adafruit Feather M0 WiFi: https://www.adafruit.com/products/3010
 // Plus a length of DotStar LEDs (strip, matrix, etc.) and a power source.
 
 #include <SPI.h>
