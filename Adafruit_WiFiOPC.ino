@@ -11,23 +11,54 @@
 //   and WiFi Shield 101:      https://www.adafruit.com/products/2891
 // Plus a length of DotStar LEDs (strip, matrix, etc.) and a power source.
 
+// Enable this line if using Adafruit ATWINC (e.g. Feather M0 WiFi):
+//#define ADAFRUIT_ATWINC
+// If using Arduino Zero + WiFi Shield 101, comment it out.
+
+//#define Serial SerialUSB // Enable if using Arduino Zero 'Native USB' port
+
+// Scroll down to 'CONFIG & GLOBALS' section for further settings.
+
+#define IP_STATIC   0
+#define IP_DYNAMIC  1
+ #define IP_BONJOUR 2
+#ifdef ADAFRUIT_ATWINC
+ #include <Adafruit_WINC1500.h>
+ #include <Adafruit_WINC1500MDNS.h>
+#else
+ #include <WiFi101.h>
+#endif
 #include <SPI.h>
-#include <WiFi101.h>
 #include <Adafruit_ZeroDMA.h>
 #include <Adafruit_ASFcore.h>
 #include "utility/dmac.h"
 #include "utility/dma.h"
 #include "wiring_private.h" // pinPeripheral() function
 
-//#define Serial SerialUSB // Enable if using Arduino Zero 'Native USB' port
-
 // CONFIG & GLOBALS --------------------------------------------------------
+
+#define IP_TYPE IP_STATIC // IP_STATIC | IP_DYNAMIC | IP_BONJOUR
 
 char      *ssid = "NETWORK_NAME",   // WiFi credentials
           *pass = "NETWORK_PASSWORD";
-IPAddress  ipaddr(192, 168, 0, 60); // OPTIONAL: static IP address
+#if (IP_TYPE == IP_STATIC)
+IPAddress  ipaddr(192, 168, 0, 60); // Static IP address, if so configured
+#endif
 #define    INPORT  7890             // Incoming TCP port to listen on
-WiFiServer server(INPORT);
+#ifdef ADAFRUIT_ATWINC // Adafruit library
+#define WINC_CS         8 // Pins 8/7/4/2 are valid for Adafruit Feather
+#define WINC_IRQ        7 // M0 WiFi.  OK to use WiFi Shield 101 with
+#define WINC_RST        4 // Adafruit_WINC1500 lib, but use pins 10/7/5,
+#define WINC_EN         2 // and comment this out if using shield.
+Adafruit_WINC1500       WiFi(WINC_CS, WINC_IRQ, WINC_RST);
+Adafruit_WINC1500Server server(INPORT);
+#if (IP_TYPE == IP_BONJOUR)
+MDNSResponder           mdns(&WiFi);       // Not in Arduino WiFi101 lib
+char                   *mdns_name = "OPC"; // Bonjour svc local name
+#endif // IP_BONJOUR
+#else  // Arduino WiFi101 library
+WiFiServer              server(INPORT);
+#endif // ADAFRUIT_ATWINC
 
 // Declare second SPI peripheral 'SPI1':
 SPIClass SPI1(      // 11/12/13 classic UNO-style SPI
@@ -99,19 +130,25 @@ void fillGamma(float g, uint8_t m, uint8_t *lo, uint8_t *hi, uint8_t *frac) {
 // SETUP (one-time init) ---------------------------------------------------
 
 void setup() {
+#ifdef WINC_EN
+  pinMode(WINC_EN, OUTPUT);
+  digitalWrite(WINC_EN, HIGH);
+#endif
+
   Serial.begin(115200);
   while(!Serial);
   Serial.println("OPC WiFi Server");
 
-  SPI.begin(); // For WiFi Shield 101
+  SPI.begin(); // For WiFi interface
 
   // Connect to WiFi network
   Serial.print("Connecting to ");
   Serial.print(ssid);
   Serial.print("..");
-  WiFi.config(ipaddr);    // If using static IP
+#if (IP_TYPE == IP_STATIC)
+  WiFi.config(ipaddr);
+#endif
   WiFi.begin(ssid, pass);
-
   // Do some other init while WiFi starts up...
 
   // Initialize SPI buffers.  Everything's set to 0xFF initially to cover
@@ -154,12 +191,24 @@ void setup() {
   }
   Serial.println("OK!");
 
-  // Print the IP address
-  Serial.println((IPAddress)WiFi.localIP());
+  // Print the IP address & port
+#if (IP_TYPE == IP_BONJOUR)
+  if(!mdns.begin(mdns_name)) {
+    Serial.println("Failed to start MDNS responder!");
+    for(;;);
+  }
+
+  Serial.print("Server listening at ");
+  Serial.print(mdns_name);
+  Serial.print(".local");
+#else // IP_STATIC or IP_DYNAMIC
+  Serial.print("Server listening at ");
+  Serial.print((IPAddress)WiFi.localIP());
+#endif
 
   // Start the server listening for incoming client connections
   server.begin();
-  Serial.print("Server listening on port ");
+  Serial.print(" port ");
   Serial.println(INPORT);
 }
 
@@ -272,7 +321,15 @@ uint32_t lastFrameTime = 0, timeBetweenFrames = 0,
          updates = 0, priorSeconds  = 0;
 
 void loop() {
+#if (IP_TYPE == IP_BONJOUR)
+  mdns.update();
+#endif
+#ifdef ADAFRUIT_ATWINC
+  Adafruit_WINC1500Client client = server.available();
+#else
   WiFiClient client = server.available();
+#endif
+
   if(client) {
     uint32_t t, timeSinceFrameStart, seconds;
     int16_t  a, bytesPending, dataSize;
