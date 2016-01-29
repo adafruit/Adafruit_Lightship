@@ -54,9 +54,9 @@ void movieEvent(Movie m) {
   else                 t.resize(arrayWidth, 0);
   // Then clip out the center section (whatever fits the LED array)
   // into a new image.  Using a temporary interim image (above) and
-  // then copying to global 'img' ensures the scaled-down image is
-  // used in draw().  Otherwise occasionally an unscaled (perhaps
-  // cached) instance would occasionally make it through and cause
+  // then copying to global 'img' ensures the scaled-down image
+  // is used in draw().  Else a race condition occurs where an
+  // unscaled instance would occasionally make it through and cause
   // a visual glitch.
   img.copy(t, (t.width-arrayWidth)/2, (t.height-arrayHeight)/2,
     arrayWidth, arrayHeight, 0, 0, arrayWidth, arrayHeight);
