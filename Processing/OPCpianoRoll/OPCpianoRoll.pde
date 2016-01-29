@@ -1,10 +1,10 @@
-// OPC "piano roll" example -- provides a rudimentary animation
-// editor/sequencer by using a cross-section of a vertically-
-// scrolling image to set pixel colors.
+// Open Pixel Control "piano roll" example -- provides a
+// rudimentary animation editor/sequencer by using a cross-
+// section of a vertically-scrolling image to set pixel colors.
 
 OPC    opc       = new OPC(this, "192.168.0.60", 7890);
-int    numPixels = 256;    // Length of LED strip
-int    xPos      = 0,      // Scrolling image X position
+int    numPixels = 256,    // Length of LED strip
+       xPos      = 0,      // Scrolling image X position
        yPos      = 0x7FFF, // Scrolling image Y position
        speed     = 30;     // Frame rate
 PImage img;
@@ -12,10 +12,11 @@ PImage img;
 void setup() {
   size(numPixels, 140, P2D);
   opc.setPixel(numPixels-1, 0); // Alloc pixel array ASAP
+  this.registerMethod("dispose", this);
   frameRate(speed);
-  selectInput("Select a file to process:", "fileSelected");
   textSize(12);
   textAlign(CENTER);
+  selectInput("Select a file to process:", "fileSelected");
 }
 
 void draw() {
@@ -66,14 +67,8 @@ void setSpeed() {
   }
 }
 
-public class DisposeHandler { // LEDs off when exiting
-  DisposeHandler(PApplet pa) {
-    pa.registerMethod("dispose", this);
-  }
-  public void dispose() {
-    for(int i=0; i < numPixels; i++) {
-      opc.setPixel(i, 0);
-    }
-    opc.writePixels();
-  }
+// Issue LEDs-off packet when certain exit conditions are caught
+void dispose() {
+  for(int i=0; i < numPixels; i++) opc.setPixel(i, 0);
+  opc.writePixels();
 }

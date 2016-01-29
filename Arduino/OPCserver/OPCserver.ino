@@ -11,17 +11,17 @@
 //   and WiFi Shield 101:      https://www.adafruit.com/products/2891
 // Plus a length of DotStar LEDs (strip, matrix, etc.) and a power source.
 
-// Enable this line if using Adafruit ATWINC (e.g. Feather M0 WiFi):
-//#define ADAFRUIT_ATWINC
-// If using Arduino Zero + WiFi Shield 101, comment it out.
+// Enable this #define if using Adafruit ATWINC (e.g. Feather M0 WiFi).
+// If using Arduino Zero + WiFi Shield 101, comment it out:
+#define ADAFRUIT_ATWINC
 
 //#define Serial SerialUSB // Enable if using Arduino Zero 'Native USB' port
 
 // Scroll down to 'CONFIG & GLOBALS' section for further settings.
 
-#define IP_STATIC   0
-#define IP_DYNAMIC  1
- #define IP_BONJOUR 2
+#define IP_STATIC  0
+#define IP_DYNAMIC 1
+#define IP_BONJOUR 2 // DO NOT USE - NOT 100% RELIABLE YET
 #ifdef ADAFRUIT_ATWINC
  #include <Adafruit_WINC1500.h>
  #include <Adafruit_WINC1500MDNS.h>
@@ -38,6 +38,7 @@
 // CONFIG & GLOBALS --------------------------------------------------------
 
 #define IP_TYPE IP_STATIC // IP_STATIC | IP_DYNAMIC | IP_BONJOUR
+// Bonjour support isn't stable yet, use IP_STATIC or IP_DYNAMIC for now
 
 char      *ssid = "NETWORK_NAME",   // WiFi credentials
           *pass = "NETWORK_PASSWORD";
@@ -52,9 +53,9 @@ IPAddress  ipaddr(192, 168, 0, 60); // Static IP address, if so configured
 #define WINC_EN         2 // and comment this out if using shield.
 Adafruit_WINC1500       WiFi(WINC_CS, WINC_IRQ, WINC_RST);
 Adafruit_WINC1500Server server(INPORT);
-#if (IP_TYPE == IP_BONJOUR)
+#if (IP_TYPE == IP_BONJOUR)                // NOT STABLE, DO NOT USE YET
 MDNSResponder           mdns(&WiFi);       // Not in Arduino WiFi101 lib
-char                   *mdns_name = "OPC"; // Bonjour svc local name
+char                   *mdns_name = "opc"; // Bonjour svc local name
 #endif // IP_BONJOUR
 #else  // Arduino WiFi101 library
 WiFiServer              server(INPORT);
@@ -93,7 +94,7 @@ uint8_t loR[256], hiR[256], fracR[256], errR[MAX_LEDS],
         loB[256], hiB[256], fracB[256], errB[MAX_LEDS];
 
 // Order of color bytes as issued to the DotStar LEDs.  Current DotStars use
-// BRG order (blue=first, red=second, green=last); pre-2015 DotStars use GBR
+// BGR order (blue=first, green=second, red=last); pre-2015 DotStars use GBR
 // order.  THESE RELATE ONLY TO THE LED STRIP; OPC data is always RGB order.
 #define DOTSTAR_BLUEBYTE  0
 #define DOTSTAR_GREENBYTE 1
@@ -357,6 +358,9 @@ void loop() {
         Serial.println(" updates/sec");
         priorSeconds = seconds;
         updates      = 0; // Reset counter
+#if (IP_TYPE == IP_BONJOUR)
+        mdns.update();
+#endif
       }
 
       // Process up to 1/2 of pending data on stream.  Rather than waiting

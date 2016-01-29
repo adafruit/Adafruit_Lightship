@@ -1,9 +1,12 @@
-// OPC "strandtest" example -- cycles R/G/B chaser along strip.
+// Open Pixel Control "strandtest" example -- cycles R/G/B
+// chaser along LED strip.
+
 OPC opc       = new OPC(this, "192.168.0.60", 7890);
-int numPixels = 256;
+int numPixels = 256; // Set this to actual strand length
 
 void setup() {
   opc.setPixel(numPixels-1, 0); // Alloc pixel array ASAP
+  this.registerMethod("dispose", this);
   frameRate(30);
 }
 
@@ -22,14 +25,8 @@ void draw() {
   opc.writePixels();
 }
 
-public class DisposeHandler { // LEDs off when exiting
-  DisposeHandler(PApplet pa) {
-    pa.registerMethod("dispose", this);
-  }
-  public void dispose() {
-    for(int i=0; i < numPixels; i++) {
-      opc.setPixel(i, 0);
-    }
-    opc.writePixels();
-  }
+// Issue LEDs-off packet when certain exit conditions are caught
+void dispose() {
+  for(int i=0; i < numPixels; i++) opc.setPixel(i, 0);
+  opc.writePixels();
 }
