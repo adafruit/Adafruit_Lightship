@@ -137,7 +137,7 @@ void setup() {
 #endif
 
   Serial.begin(115200);
-  while(!Serial);
+  // while(!Serial); // Waits for serial monitor to be opened
   Serial.println("OPC WiFi Server");
 
   SPI.begin(); // For WiFi interface
