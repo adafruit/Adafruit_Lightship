@@ -8,14 +8,17 @@
 
 import java.net.*;
 import java.util.Arrays;
+import java.io.File;
+import java.io.FileOutputStream;
 
 public class OPC implements Runnable
 {
+  PApplet parent;
   Thread thread;
   Socket socket;
   OutputStream output, pending;
-  String host;
-  int port;
+  String host, filename;
+  int port, fps;
 
   int[] pixelLocations;
   byte[] packetData;
@@ -23,15 +26,45 @@ public class OPC implements Runnable
   String colorCorrection;
   boolean enableShowLocations;
 
+  // Constructor for network use:
   OPC(PApplet parent, String host, int port)
   {
-    this.host = host;
-    this.port = port;
+    this.parent = parent;
+    this.host   = host;
+    this.port   = port;
+    this.fps    = 0; // Don't change FPS, use current Processing settings
+    init();
+  }
+
+  // Constructor for file use w/frames-per-second argument:
+  OPC(PApplet parent, int fps, String filename)
+  {
+    // Need to save parent object in case OPC constructor is global
+    // (not in setup())...frameRate() doesn't exist until running.
+    this.parent   = parent;
+    this.filename = filename;
+    this.fps      = fps;
+    init();
+  }
+
+  // Constructor for file use w/default 30 fps:
+  OPC(PApplet parent, String filename)
+  {
+    this.parent   = parent;
+    this.filename = filename;
+    this.fps      = 30;
+    init();
+  }
+
+  // Initialization common to both network and file modes:
+  void init()
+  {
     thread = new Thread(this);
     thread.start();
     this.enableShowLocations = true;
     registerMethod("draw", this);
-}
+  }
+
 
   // Set the location of a single LED
   void led(int index, int x, int y)  
@@ -183,6 +216,7 @@ public class OPC implements Runnable
 
     try {
       pending.write(packet);
+      pending.flush();
     } catch (Exception e) {
       dispose();
     }
@@ -215,6 +249,7 @@ public class OPC implements Runnable
     try {
       pending.write(header);
       pending.write(content);
+      pending.flush();
     } catch (Exception e) {
       dispose();
     }
@@ -234,6 +269,8 @@ public class OPC implements Runnable
     if (output == null) {
       return;
     }
+
+    if(fps > 0) parent.frameRate(fps); // Can't set in constructor
 
     int numPixels = pixelLocations.length;
     int ledAddress = 4;
@@ -319,6 +356,7 @@ public class OPC implements Runnable
 
     try {
       output.write(packetData);
+      output.flush();
     } catch (Exception e) {
       dispose();
     }
@@ -343,19 +381,36 @@ public class OPC implements Runnable
     for(;;) {
 
       if(output == null) { // No OPC connection?
-        try {              // Make one!
-          socket = new Socket(host, port);
-          socket.setTcpNoDelay(true);
-          pending = socket.getOutputStream(); // Avoid race condition...
-          println("Connected to OPC server");
-          sendColorCorrectionPacket();        // These write to 'pending'
-          sendFirmwareConfigPacket();         // rather than 'output' before
-          output = pending;                   // rest of code given access.
-          // pending not set null, more config packets are OK!
-        } catch (ConnectException e) {
-          dispose();
-        } catch (IOException e) {
-          dispose();
+
+        if(filename == null) { // Attempt network connection
+          try {
+            socket = new Socket(host, port);
+            socket.setTcpNoDelay(true);
+            pending = socket.getOutputStream(); // Avoid race condition...
+            System.out.format("Connected to OPC server at %s port %d\n", host, port);
+            // pending not set null, more config packets are OK!
+          } catch (ConnectException e) {
+            dispose();
+          } catch (IOException e) {
+            dispose();
+          }
+        } else { // Attempt file output
+          try {
+            File file = new File(filename);
+            pending = new FileOutputStream(file);
+            System.out.format("Writing to file '%s'\n", filename);
+            byte[] header = new byte[] { 'O', 'P', 'C', (byte)this.fps };
+            pending.write(header);
+            pending.flush();
+          } catch (IOException e) {
+            dispose();
+          }
+        }
+
+        if(pending != null) {          // New connection success?
+          sendColorCorrectionPacket(); // These write to 'pending'
+          sendFirmwareConfigPacket();  // rather than 'output' before
+          output = pending;            // rest of code given access.
         }
       }
 
@@ -367,4 +422,5 @@ public class OPC implements Runnable
       }
     }
   }
+
 }
