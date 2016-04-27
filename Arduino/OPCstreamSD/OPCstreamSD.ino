@@ -96,6 +96,69 @@ void fillGamma(float g, uint8_t m, uint8_t *lo, uint8_t *hi, uint8_t *frac) {
   }
 }
 
+// This function interpolates between two RGB input buffers, gamma- and
+// color-corrects the interpolated result with 16-bit dithering and issues
+// the resulting data to the GPIO port.
+void magic(
+ uint8_t *rgbIn1,    // First RGB input buffer being interpolated
+ uint8_t *rgbIn2,    // Second RGB input buffer being interpolated
+ uint8_t  w2,        // Weighting (0-255) of second buffer in interpolation
+ uint8_t *fillBuf,   // SPI data buffer being filled (DotStar-native order)
+ uint16_t numLEDs) { // Number of LEDs in buffer
+  uint8_t   mix;
+  uint16_t  weight1, weight2, pixelNum, e;
+  uint8_t  *fillPtr = fillBuf + 5; // Skip 4-byte header + 1 byte pixel marker
+
+  weight2 = (uint16_t)w2 + 1; // 1-256
+  weight1 = 257 - weight2;    // 1-256
+
+  for(pixelNum = 0; pixelNum < numLEDs; pixelNum++, fillPtr += 4) {
+    // Interpolate red from rgbIn1 and rgbIn2 based on weightings
+    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
+    // fracR is the fractional portion (0-255) of the 16-bit gamma-
+    // corrected value for a given red brightness...essentially it's
+    // how far 'off' a given 8-bit brightness value is from its ideal.
+    // This error is carried forward to the next frame in the errR
+    // buffer...added to the fracR value for the current pixel...
+    e = fracR[mix] + errR[pixelNum];
+    // ...if this accumulated value exceeds 255, the resulting red
+    // value is bumped up to the next brightness level and 256 is
+    // subtracted from the error term before storing back in errR.
+    // Diffusion dithering is the result.
+    fillPtr[DOTSTAR_REDBYTE] = (e < 256) ? loR[mix] : hiR[mix];
+    // If e exceeds 256, it *should* be reduced by 256 at this point...
+    // but rather than subtract, we just rely on truncation in the 8-bit
+    // store operation below to do this implicitly. (e & 0xFF)
+    errR[pixelNum] = e;
+
+    // Repeat same operations for green...
+    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
+    e   = fracG[mix] + errG[pixelNum];
+    fillPtr[DOTSTAR_GREENBYTE] = (e < 256) ? loG[mix] : hiG[mix];
+    errG[pixelNum] = e;
+
+    // ...and blue...
+    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
+    e   = fracB[mix] + errB[pixelNum];
+    fillPtr[DOTSTAR_BLUEBYTE] = (e < 256) ? loB[mix] : hiB[mix];
+    errB[pixelNum] = e;
+  }
+
+  while(!spiReady); // Wait for prior SPI DMA transfer to complete
+
+  // Set up DMA transfer using the newly-filled buffer as source...
+  myDMA.setup_transfer_descriptor(
+    fillBuf,                          // Source address
+    (void *)(&SERCOM1->SPI.DATA.reg), // Dest address
+    SPI_BUFFER_SIZE,                  // Data count
+    DMA_BEAT_SIZE_BYTE,               // Bytes/halfwords/words
+    true,                             // Increment source address
+    false);                           // Don't increment dest
+
+  myDMA.start_transfer_job();
+  spiReady = false;
+}
+
 // SETUP (one-time init) ---------------------------------------------------
 
 // Comparison function for qsort() filename sorting
@@ -171,71 +234,6 @@ void setup() {
   // Turn off LEDs
   magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], MAX_LEDS);
   spiBufferBeingFilled = 1 - spiBufferBeingFilled;
-}
-
-// -------------------------------------------------------------------------
-
-// This function interpolates between two RGB input buffers, gamma- and
-// color-corrects the interpolated result with 16-bit dithering and issues
-// the resulting data to the GPIO port.
-void magic(
- uint8_t *rgbIn1,    // First RGB input buffer being interpolated
- uint8_t *rgbIn2,    // Second RGB input buffer being interpolated
- uint8_t  w2,        // Weighting (0-255) of second buffer in interpolation
- uint8_t *fillBuf,   // SPI data buffer being filled (DotStar-native order)
- uint16_t numLEDs) { // Number of LEDs in buffer
-  uint8_t   mix;
-  uint16_t  weight1, weight2, pixelNum, e;
-  uint8_t  *fillPtr = fillBuf + 5; // Skip 4-byte header + 1 byte pixel marker
-
-  weight2 = (uint16_t)w2 + 1; // 1-256
-  weight1 = 257 - weight2;    // 1-256
-
-  for(pixelNum = 0; pixelNum < numLEDs; pixelNum++, fillPtr += 4) {
-    // Interpolate red from rgbIn1 and rgbIn2 based on weightings
-    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
-    // fracR is the fractional portion (0-255) of the 16-bit gamma-
-    // corrected value for a given red brightness...essentially it's
-    // how far 'off' a given 8-bit brightness value is from its ideal.
-    // This error is carried forward to the next frame in the errR
-    // buffer...added to the fracR value for the current pixel...
-    e = fracR[mix] + errR[pixelNum];
-    // ...if this accumulated value exceeds 255, the resulting red
-    // value is bumped up to the next brightness level and 256 is
-    // subtracted from the error term before storing back in errR.
-    // Diffusion dithering is the result.
-    fillPtr[DOTSTAR_REDBYTE] = (e < 256) ? loR[mix] : hiR[mix];
-    // If e exceeds 256, it *should* be reduced by 256 at this point...
-    // but rather than subtract, we just rely on truncation in the 8-bit
-    // store operation below to do this implicitly. (e & 0xFF)
-    errR[pixelNum] = e;
-
-    // Repeat same operations for green...
-    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
-    e   = fracG[mix] + errG[pixelNum];
-    fillPtr[DOTSTAR_GREENBYTE] = (e < 256) ? loG[mix] : hiG[mix];
-    errG[pixelNum] = e;
-
-    // ...and blue...
-    mix = (*rgbIn1++ * weight1 + *rgbIn2++ * weight2) >> 8;
-    e   = fracB[mix] + errB[pixelNum];
-    fillPtr[DOTSTAR_BLUEBYTE] = (e < 256) ? loB[mix] : hiB[mix];
-    errB[pixelNum] = e;
-  }
-
-  while(!spiReady); // Wait for prior SPI DMA transfer to complete
-
-  // Set up DMA transfer using the newly-filled buffer as source...
-  myDMA.setup_transfer_descriptor(
-    fillBuf,                          // Source address
-    (void *)(&SERCOM1->SPI.DATA.reg), // Dest address
-    SPI_BUFFER_SIZE,                  // Data count
-    DMA_BEAT_SIZE_BYTE,               // Bytes/halfwords/words
-    true,                             // Increment source address
-    false);                           // Don't increment dest
-
-  myDMA.start_transfer_job();
-  spiReady = false;
 }
 
 // OPC-HANDLING LOOP -------------------------------------------------------
