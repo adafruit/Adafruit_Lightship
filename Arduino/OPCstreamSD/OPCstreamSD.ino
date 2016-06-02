@@ -70,6 +70,24 @@ uint8_t loR[256], hiR[256], fracR[256], errR[MAX_LEDS],
 
 Adafruit_ZeroDMA myDMA; // For DMA transfers
 
+#define BUTTON_BACK       17 // Back to start of current file, or prior
+#define BUTTON_BRIGHTNESS 18 // Next brightness setting (wraps around)
+#define BUTTON_NEXT       19 // Advance to next file
+#define BRIGHTNESS_LEVELS  5 // Includes 0 (off) and 255 (max)
+uint8_t brightIndex;         // Initialized to max in setup()
+
+struct {
+  uint8_t  pin;  
+  uint8_t  priorState;
+  uint32_t stateChangeTime;
+  boolean  active;
+} button[] = {
+  { BUTTON_BACK       },
+  { BUTTON_BRIGHTNESS },
+  { BUTTON_NEXT       }
+};
+#define NUM_BUTTONS (sizeof(button) / sizeof(button[0]))
+
 // UTILITY FUNCTIONS -------------------------------------------------------
 
 // Called each time a DMA transfer finishes
@@ -94,6 +112,16 @@ void fillGamma(float g, uint8_t m, uint8_t *lo, uint8_t *hi, uint8_t *frac) {
     for(j=i; (j<256) && (lo[j] <= n); j++);
     hi[i] = lo[j];
   }
+}
+
+// Set new brightness level; fill R/G/B gamma tables
+void brightness(uint8_t n) {
+  brightIndex = n % BRIGHTNESS_LEVELS;
+  uint8_t m = (uint8_t)(pow((double)brightIndex /
+    (double)(BRIGHTNESS_LEVELS - 1), 2.7) * 255.0 + 0.5);
+  fillGamma(2.7, m, loR, hiR, fracR);
+  fillGamma(2.7, m, loG, hiG, fracG);
+  fillGamma(2.7, m, loB, hiB, fracB);
 }
 
 // This function interpolates between two RGB input buffers, gamma- and
@@ -167,9 +195,10 @@ int cmp(const void *a, const void *b) {
 }
 
 void setup() {
-  File  entry;
-  char *name, header[3];
-  int   len;
+  File    entry;
+  char   *name, header[3];
+  int     len;
+  uint8_t i;
 
   Serial.begin(115200);
   // while(!Serial); // Waits for serial monitor to be opened
@@ -196,7 +225,7 @@ void setup() {
   }
   qsort(filename, nFiles, sizeof(char *), cmp); // Sort filename list
   Serial.println("Valid OPC files found:");
-  for(uint8_t i=0; i<nFiles; i++) {
+  for(i=0; i<nFiles; i++) {
     Serial.print("  ");
     Serial.println(filename[i]);
   }
@@ -206,12 +235,10 @@ void setup() {
   // 4 bytes of each buffer are set to 0x00 as start-of-data marker.
   memset(spiBuffer, 0xFF, sizeof(spiBuffer));
   for(uint8_t b=0; b<2; b++) {
-    for(uint8_t i=0; i<4; i++) spiBuffer[b][i] = 0x00;
+    for(i=0; i<4; i++) spiBuffer[b][i] = 0x00;
   }
 
-  fillGamma(2.7, 255, loR, hiR, fracR); // Initialize gamma tables to
-  fillGamma(2.7, 255, loG, hiG, fracG); // default values (OPC data may
-  fillGamma(2.7, 255, loB, hiB, fracB); // override this later).
+  brightness(BRIGHTNESS_LEVELS - 1); // Init gamma tables
   // err buffers don't need init, they'll naturally reach equilibrium
 
   memset(rgbBuf, 0, sizeof(rgbBuf)); // Clear receive buffers
@@ -234,6 +261,13 @@ void setup() {
   // Turn off LEDs
   magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], MAX_LEDS);
   spiBufferBeingFilled = 1 - spiBufferBeingFilled;
+
+  for(i=0; i<NUM_BUTTONS; i++) {
+    pinMode(button[i].pin, INPUT_PULLUP);
+    button[i].priorState      = digitalRead(button[i].pin);
+    button[i].stateChangeTime = micros();
+    button[i].active          = true;
+  }
 }
 
 // OPC-HANDLING LOOP -------------------------------------------------------
@@ -278,15 +312,18 @@ uint8_t bufPrior = 0, bufMostRecentlyRead = 1, bufBeingRead = 2;
 // updates-per-second estimate.
 uint32_t lastFrameTime = 0, timeBetweenFrames = 0,
          updates = 0, priorSeconds  = 0;
+uint32_t fileStartTime = 0;
 
 void loop() {
-  File file;
+  File   file;
+  int8_t fileDirection = 1; // May override if "back" button pressed
 
   Serial.println(filename[currentFile]);
 
   if(file = SD.open(filename[currentFile])) {
     char header[4];
     if((file.read(header, 4) == 4) && !strncmp(header, "OPC", 3)) {
+      fileStartTime     = micros();
       timeBetweenFrames = 1000000L / (uint8_t)(header[3] ? header[3] : 30);
 
       uint32_t t, timeSinceFrameStart, seconds;
@@ -295,6 +332,35 @@ void loop() {
       boolean  nextFrameReady = false;
 
       while(file.available()) {
+
+        for(uint8_t i=0; i<NUM_BUTTONS; i++) {
+          t = micros();                           // Note current time
+          uint8_t s = digitalRead(button[i].pin); // and button state
+          // Debounce input
+          if(s != button[i].priorState) {  // Has state changed?
+            button[i].priorState      = s; // Save new state
+            button[i].stateChangeTime = t; // and record the time
+          } else if((t - button[i].stateChangeTime) >= 50000) {
+            // State has been steady for at least 50 ms
+            if(s == LOW) { // Debounced state = PRESSED
+              if(button[i].active) {
+                button[i].active = false; // Inactive until debounced release
+                switch(button[i].pin) {
+                 case BUTTON_BACK: // Restart current file, or go to prior
+                  fileDirection = ((t - fileStartTime) <= 2000000) ? -1 : 0;
+                  // No break, fall through...
+                 case BUTTON_NEXT:
+                  goto eof; // OMFG GUISE A GOTO!!!1!
+                 case BUTTON_BRIGHTNESS:
+                  brightness(brightIndex + 1); // Cycle brightness levels
+                  break;
+                }
+              }
+            } else { // Debounced state = RELEASED
+              button[i].active = true;
+            }
+          }
+        }
 
         // DITHER-AND-READ LOOP STARTS HERE --------------------------------
   
@@ -405,6 +471,7 @@ void loop() {
 
       } // end while(file.available())
     } // end if(valid file)
+    eof:
     file.close();
   } // end if(open)
 
@@ -414,5 +481,7 @@ void loop() {
   magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], numLEDs);
   spiBufferBeingFilled = 1 - spiBufferBeingFilled;
 
-  if(++currentFile >= nFiles) currentFile = 0;
+  currentFile += fileDirection;
+  if(currentFile >= nFiles) currentFile = 0;
+  else if(currentFile < 0)  currentFile = nFiles - 1;
 }
