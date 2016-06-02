@@ -45,6 +45,7 @@ void fileSelected(File selection) {
 
 void movieEvent(Movie m) {
   m.read();
+  opc.enable();       // File write enabled only when movie's playing
   PImage t = m.get(); // Movie frame to temporary PImage
   // First, scale image to a smaller size that maintains
   // aspect ratio, while minor axis fills LED array.

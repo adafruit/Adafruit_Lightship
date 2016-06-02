@@ -49,6 +49,7 @@ void fileSelected(File selection) {
     xPos     = (width - img.width) / 2;
     yPos     = height;
     opc.ledStrip(0, numPixels, (width - 1) / 2, 60, 1, 0.0, false);
+    opc.enable(); // File write enabled after image selected
   } else {
     println("Cancelled");
     exit();

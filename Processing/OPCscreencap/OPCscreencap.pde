@@ -37,17 +37,13 @@ void setup() {
   }
   gc           = gd[screenNum].getConfigurations();
   dispBounds   = gc[0].getBounds();
-println(dispBounds.x);
-println(dispBounds.y);
-println(dispBounds.width);
-println(dispBounds.height);
-//  dispBounds.x = dispBounds.y = 0;
 
   // Set up OPC pixel grid.  Arguments are: 1st pixel index,
   // row length, # of rows, center x, y, horizontal & vertical
   // pixel spacing, angle (radians), 'zigzag' flag (true/false):
   opc.ledGrid(0, arrayWidth, arrayHeight, (width - 1) / 2,
     (height - 1) / 2, pixelSize, pixelSize, 0, true);
+  opc.enable();
 }
 
 // PER_FRAME PROCESSING ------------------------------------------------------

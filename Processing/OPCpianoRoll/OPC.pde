@@ -24,7 +24,7 @@ public class OPC implements Runnable
   byte[] packetData;
   byte firmwareConfig;
   String colorCorrection;
-  boolean enableShowLocations;
+  boolean enableShowLocations, enabled;
 
   // Constructor for network use:
   OPC(PApplet parent, String host, int port)
@@ -62,6 +62,7 @@ public class OPC implements Runnable
     thread = new Thread(this);
     thread.start();
     this.enableShowLocations = true;
+    this.enabled = (filename == null); // Enable output if network mode
     registerMethod("draw", this);
   }
 
@@ -127,6 +128,21 @@ public class OPC implements Runnable
   void ledGrid8x8(int index, float x, float y, float spacing, float angle, boolean zigzag)
   {
     ledGrid(index, 8, 8, x, y, spacing, spacing, angle, zigzag);
+  }
+
+  void enable(boolean e) // Pass true/false to enable/disable output
+  {
+    enabled = e;
+  }
+
+  void enable()
+  {
+    enabled = true;
+  }
+
+  void disable()
+  {
+    enabled = false;
   }
 
   // Should the pixel sampling locations be visible? This helps with debugging.
@@ -262,11 +278,7 @@ public class OPC implements Runnable
   // separately.
   void draw()
   {
-    if (pixelLocations == null) {
-      // No pixels defined yet
-      return;
-    }
-    if (output == null) {
+    if ( (pixelLocations == null) || (output == null) || (enabled == false) ) {
       return;
     }
 

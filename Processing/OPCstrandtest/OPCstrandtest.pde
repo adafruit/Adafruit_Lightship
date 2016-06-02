@@ -6,6 +6,7 @@ int numPixels = 256; // Set this to actual strand length
 
 void setup() {
   opc.setPixel(numPixels-1, 0); // Alloc pixel array ASAP
+  opc.enable();
   this.registerMethod("dispose", this);
   frameRate(30);
 }
