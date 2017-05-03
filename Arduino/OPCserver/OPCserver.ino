@@ -22,12 +22,7 @@
 #define IP_STATIC  0
 #define IP_DYNAMIC 1
 #define IP_BONJOUR 2 // DO NOT USE - NOT 100% RELIABLE YET
-#ifdef ADAFRUIT_ATWINC
- #include <Adafruit_WINC1500.h>
- #include <Adafruit_WINC1500MDNS.h>
-#else
- #include <WiFi101.h>
-#endif
+#include <WiFi101.h>
 #include <SPI.h>
 #include <Adafruit_ZeroDMA.h>
 #include <Adafruit_ASFcore.h>
@@ -40,26 +35,13 @@
 #define IP_TYPE IP_STATIC // IP_STATIC | IP_DYNAMIC | IP_BONJOUR
 // Bonjour support isn't stable yet, use IP_STATIC or IP_DYNAMIC for now
 
-char      *ssid = "NETWORK_NAME",   // WiFi credentials
-          *pass = "NETWORK_PASSWORD";
+char       ssid[] = "NETWORK_NAME",   // WiFi credentials
+           pass[] = "NETWORK_PASSWORD";
 #if (IP_TYPE == IP_STATIC)
-IPAddress  ipaddr(192, 168, 0, 60); // Static IP address, if so configured
+IPAddress  ipaddr(192, 168, 0, 60);   // Static IP address, if so configured
 #endif
-#define    INPORT  7890             // Incoming TCP port to listen on
-#ifdef ADAFRUIT_ATWINC // Adafruit library
-#define WINC_CS         8 // Pins 8/7/4/2 are valid for Adafruit Feather
-#define WINC_IRQ        7 // M0 WiFi.  OK to use WiFi Shield 101 with
-#define WINC_RST        4 // Adafruit_WINC1500 lib, but use pins 10/7/5,
-#define WINC_EN         2 // and comment this out if using shield.
-Adafruit_WINC1500       WiFi(WINC_CS, WINC_IRQ, WINC_RST);
-Adafruit_WINC1500Server server(INPORT);
-#if (IP_TYPE == IP_BONJOUR)                // NOT STABLE, DO NOT USE YET
-MDNSResponder           mdns(&WiFi);       // Not in Arduino WiFi101 lib
-char                   *mdns_name = "opc"; // Bonjour svc local name
-#endif // IP_BONJOUR
-#else  // Arduino WiFi101 library
-WiFiServer              server(INPORT);
-#endif // ADAFRUIT_ATWINC
+#define    INPORT 7890                // Incoming TCP port to listen on
+WiFiServer server(INPORT);
 
 // Declare second SPI peripheral 'SPI1':
 SPIClass SPI1(      // 11/12/13 classic UNO-style SPI
@@ -196,11 +178,6 @@ void magic(
 // SETUP (one-time init) ---------------------------------------------------
 
 void setup() {
-#ifdef WINC_EN
-  pinMode(WINC_EN, OUTPUT);
-  digitalWrite(WINC_EN, HIGH);
-#endif
-
   Serial.begin(115200);
   // while(!Serial); // Waits for serial monitor to be opened
   Serial.println("OPC WiFi Server");
@@ -208,6 +185,9 @@ void setup() {
   SPI.begin(); // For WiFi interface
 
   // Connect to WiFi network
+#ifdef ADAFRUIT_ATWINC
+  WiFi.setPins(8, 7, 4, 2); // Pins for Adafruit ATWINC1500 Feather
+#endif
   Serial.print("Connecting to ");
   Serial.print(ssid);
   Serial.print("..");
@@ -325,11 +305,7 @@ void loop() {
 #if (IP_TYPE == IP_BONJOUR)
   mdns.update();
 #endif
-#ifdef ADAFRUIT_ATWINC
-  Adafruit_WINC1500Client client = server.available();
-#else
   WiFiClient client = server.available();
-#endif
 
   if(client) {
     uint32_t t, timeSinceFrameStart, seconds;
