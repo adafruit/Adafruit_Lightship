@@ -14,8 +14,6 @@
 #include <SPI.h>
 #include <SD.h>
 #include <Adafruit_ZeroDMA.h>
-#include <Adafruit_ASFcore.h>
-#include "utility/dmac.h"
 #include "utility/dma.h"
 #include "wiring_private.h" // pinPeripheral() function
 
@@ -69,6 +67,7 @@ uint8_t loR[256], hiR[256], fracR[256], errR[MAX_LEDS],
 #define DOTSTAR_REDBYTE   2
 
 Adafruit_ZeroDMA myDMA; // For DMA transfers
+DmacDescriptor  *desc;  // DMA descriptor address
 
 #define BUTTON_BACK       17 // Back to start of current file, or prior
 #define BUTTON_BRIGHTNESS 18 // Next brightness setting (wraps around)
@@ -91,7 +90,7 @@ struct {
 // UTILITY FUNCTIONS -------------------------------------------------------
 
 // Called each time a DMA transfer finishes
-void dma_callback(struct dma_resource* const resource) {
+void dma_callback(Adafruit_ZeroDMA *dma) {
   spiReady = true; // OK to issue next SPI DMA payload now!
 }
 
@@ -174,17 +173,12 @@ void magic(
 
   while(!spiReady); // Wait for prior SPI DMA transfer to complete
 
-  // Set up DMA transfer using the newly-filled buffer as source...
-  myDMA.setup_transfer_descriptor(
-    fillBuf,                          // Source address
-    (void *)(&SERCOM1->SPI.DATA.reg), // Dest address
-    SPI_BUFFER_SIZE,                  // Data count
-    DMA_BEAT_SIZE_BYTE,               // Bytes/halfwords/words
-    true,                             // Increment source address
-    false);                           // Don't increment dest
+  // Modify the DMA descriptor using the newly-filled buffer as source...
+  myDMA.changeDescriptor(desc, // DMA descriptor address
+    fillBuf);                  // New src only; dst & count don't change
 
-  myDMA.start_transfer_job();
   spiReady = false;
+  myDMA.startJob();
 }
 
 // SETUP (one-time init) ---------------------------------------------------
@@ -251,12 +245,17 @@ void setup() {
   // glitching, try setting to 8 MHz above.
 
   // Configure DMA for SERCOM1 (our 'SPI1' port on 11/12/13)
-  myDMA.configure_peripheraltrigger(SERCOM1_DMAC_ID_TX);
-  myDMA.configure_triggeraction(DMA_TRIGGER_ACTON_BEAT);
+  myDMA.setTrigger(SERCOM1_DMAC_ID_TX);
+  myDMA.setAction(DMA_TRIGGER_ACTON_BEAT);
   myDMA.allocate();
-  myDMA.add_descriptor();
-  myDMA.register_callback(dma_callback);
-  myDMA.enable_callback();
+  desc = myDMA.addDescriptor(
+    NULL,                             // Source address (not set yet)
+    (void *)(&SERCOM1->SPI.DATA.reg), // Dest address
+    SPI_BUFFER_SIZE,                  // Data count
+    DMA_BEAT_SIZE_BYTE,               // Bytes/halfwords/words
+    true,                             // Increment source address
+    false);                           // Don't increment dest
+  myDMA.setCallback(dma_callback);
 
   // Turn off LEDs
   magic(rgbBuf[0], rgbBuf[0], 0, spiBuffer[spiBufferBeingFilled], MAX_LEDS);
